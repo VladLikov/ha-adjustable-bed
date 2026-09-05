@@ -1148,6 +1148,12 @@ def _parse_authentication(raw: object, path: str) -> Authentication:
             path,
             "CHALLENGE_RESPONSE authentication requires a request builder and response parser",
         )
+    if method is AuthenticationMethod.CUSTOM:
+        core._fail(
+            "unsupported_authentication_method",
+            path,
+            "CUSTOM authentication requires semantics that final v1 does not model",
+        )
     return Authentication(method, selectors, request, response)
 
 
@@ -1474,6 +1480,17 @@ def _validate_final_references(document: FinalProtocolIRDocument) -> None:
                     source_domain = tuple(
                         lookup[core._scalar_sort_key(value)] for value in source_domain
                     )
+        if source_domain is not None and any(
+            type(value) is not int or value < 0 or value.bit_length() > field.width * 8
+            for value in source_domain
+        ):
+            diagnostics.append(
+                core.IRDiagnostic(
+                    "packet_field_value_out_of_range",
+                    f"$.packet_fields.{field_id}",
+                    "reachable field values must be unsigned integers that fit the field width",
+                )
+            )
         if field.source is PacketFieldSource.ACTION_PARAMETER:
             reference(
                 "action_parameters", field.source_ref, f"$.packet_fields.{field_id}.source_ref"
@@ -1552,6 +1569,20 @@ def _validate_final_references(document: FinalProtocolIRDocument) -> None:
                     "packet builder fields must occupy disjoint byte ranges",
                 )
             )
+        expected_offset = 0
+        has_gap = False
+        for start, end in fields:
+            if start != expected_offset:
+                has_gap = True
+            expected_offset = end
+        if has_gap:
+            diagnostics.append(
+                core.IRDiagnostic(
+                    "packet_builder_field_gap",
+                    f"$.packet_builders.{builder_id}.fields",
+                    "packet builder fields must cover a contiguous range starting at byte zero",
+                )
+            )
         checksum = collections["checksums"].get(builder.checksum or "")
         if isinstance(checksum, Checksum) and checksum.end_byte > max(
             (end for _start, end in fields), default=0
@@ -1591,6 +1622,17 @@ def _validate_final_references(document: FinalProtocolIRDocument) -> None:
         )
     for field_id, field in document.parser_fields:
         reference("selectors", field.target_selector, f"$.parser_fields.{field_id}.target_selector")
+        bit_width = field.width * 8
+        if bit_width > 16:
+            diagnostics.append(
+                core.IRDiagnostic(
+                    "parser_output_outside_selector_domain",
+                    f"$.parser_fields.{field_id}",
+                    "the raw field has more possible outputs than final v1 can model",
+                )
+            )
+            continue
+        output_domain: tuple[core.JsonScalar, ...] = tuple(range(1 << bit_width))
         for index, transform in enumerate(field.transforms):
             reference("transforms", transform, f"$.parser_fields.{field_id}.transforms[{index}]")
             definition = collections["transforms"].get(transform)
@@ -1605,6 +1647,51 @@ def _validate_final_references(document: FinalProtocolIRDocument) -> None:
                         "transform_operand_out_of_range",
                         f"$.parser_fields.{field_id}.transforms[{index}]",
                         "arithmetic transform operand does not fit the target field width",
+                    )
+                )
+            if (
+                isinstance(definition, Transform)
+                and definition.operation in {TransformOperation.ADD, TransformOperation.XOR}
+                and type(definition.operand) is int
+                and all(type(value) is int for value in output_domain)
+            ):
+                operand = definition.operand
+                output_domain = tuple(
+                    value + operand
+                    if definition.operation is TransformOperation.ADD
+                    else value ^ operand
+                    for value in output_domain
+                    if type(value) is int
+                )
+            elif (
+                isinstance(definition, Transform)
+                and definition.operation is TransformOperation.LOOKUP
+            ):
+                lookup = {core._scalar_sort_key(key): value for key, value in definition.lookup}
+                missing = tuple(
+                    value for value in output_domain if core._scalar_sort_key(value) not in lookup
+                )
+                if missing:
+                    diagnostics.append(
+                        core.IRDiagnostic(
+                            "lookup_domain_incomplete",
+                            f"$.parser_fields.{field_id}.transforms[{index}]",
+                            f"lookup does not cover reachable parser values {missing!r}",
+                        )
+                    )
+                else:
+                    output_domain = tuple(
+                        lookup[core._scalar_sort_key(value)] for value in output_domain
+                    )
+        selector = collections["selectors"].get(field.target_selector)
+        if isinstance(selector, SelectorDefinition):
+            selector_values = {core._scalar_sort_key(value) for value in selector.values}
+            if any(core._scalar_sort_key(value) not in selector_values for value in output_domain):
+                diagnostics.append(
+                    core.IRDiagnostic(
+                        "parser_output_outside_selector_domain",
+                        f"$.parser_fields.{field_id}",
+                        "parser outputs must belong to the target selector domain",
                     )
                 )
     for parser_id, parser in document.notification_parsers:
@@ -1733,6 +1820,64 @@ def _validate_final_references(document: FinalProtocolIRDocument) -> None:
                         )
                     )
         protocol = protocols.get(mapping.protocol)
+        if isinstance(protocol, core.ProtocolDefinition) and isinstance(transport, Transport):
+            selector_refs: list[str] = []
+            if isinstance(builder, PacketBuilder):
+                selector_refs.extend(
+                    field.source_ref
+                    for field_id in builder.fields
+                    if isinstance(field := collections["packet_fields"].get(field_id), PacketField)
+                    and field.source is PacketFieldSource.SELECTOR
+                    and field.source_ref is not None
+                )
+            authentication = collections["authentications"].get(transport.authentication or "")
+            if isinstance(authentication, Authentication):
+                selector_refs.extend(authentication.selectors)
+                request_builder = collections["packet_builders"].get(
+                    authentication.request_builder or ""
+                )
+                if isinstance(request_builder, PacketBuilder):
+                    selector_refs.extend(
+                        field.source_ref
+                        for field_id in request_builder.fields
+                        if isinstance(
+                            field := collections["packet_fields"].get(field_id), PacketField
+                        )
+                        and field.source is PacketFieldSource.SELECTOR
+                        and field.source_ref is not None
+                    )
+                response_parser = collections["notification_parsers"].get(
+                    authentication.response_parser or ""
+                )
+                if isinstance(response_parser, NotificationParser):
+                    selector_refs.extend(
+                        field.target_selector
+                        for field_id in response_parser.fields
+                        if isinstance(
+                            field := collections["parser_fields"].get(field_id), ParserField
+                        )
+                    )
+            parser = collections["notification_parsers"].get(transport.notification_parser or "")
+            if isinstance(parser, NotificationParser):
+                selector_refs.extend(
+                    field.target_selector
+                    for field_id in parser.fields
+                    if isinstance(field := collections["parser_fields"].get(field_id), ParserField)
+                )
+            for selector_id in selector_refs:
+                selector = collections["selectors"].get(selector_id)
+                if (
+                    isinstance(selector, SelectorDefinition)
+                    and selector.variant_space != protocol.variant_space
+                ):
+                    diagnostics.append(
+                        core.IRDiagnostic(
+                            "action_mapping_selector_variant_space_mismatch",
+                            f"$.action_mappings.{mapping_id}.transport",
+                            f"selector {selector_id!r} is outside protocol {mapping.protocol!r}'s "
+                            "variant space",
+                        )
+                    )
         if protocol is not None:
             dimensions = dict(
                 cast(

@@ -91,7 +91,18 @@ def _document() -> dict[str, object]:
                 "write_modes": ["WITHOUT_RESPONSE"],
             }
         },
-        "transforms": {"xor": {"operation": "XOR", "operand": 1}},
+        "transforms": {
+            "xor": {"operation": "XOR", "operand": 1},
+            "state_lookup": {
+                "operation": "LOOKUP",
+                "lookup": [
+                    [value, "idle"]
+                    for value in sorted(
+                        range(256), key=lambda value: core._canonical_json([value, "idle"])
+                    )
+                ],
+            },
+        },
         "checksums": {
             "checksum": {
                 "algorithm": "SUM8",
@@ -131,7 +142,7 @@ def _document() -> dict[str, object]:
                 "offset": 0,
                 "width": 1,
                 "target_selector": "user_state",
-                "transforms": [],
+                "transforms": ["state_lookup"],
             }
         },
         "notification_parsers": {"parser": {"buffering": "datagram", "fields": ["state"]}},
@@ -573,6 +584,37 @@ def test_packet_lookup_uses_domain_after_arithmetic_transforms() -> None:
     _load(data)
 
 
+@pytest.mark.parametrize("value", [256, -1, "not-a-byte"])
+def test_packet_field_values_must_fit_their_destination_width(value: object) -> None:
+    data = _document()
+    parameters = data["action_parameters"]
+    assert isinstance(parameters, dict)
+    strength = parameters["strength"]
+    assert isinstance(strength, dict)
+    strength["values"] = [value]
+
+    with pytest.raises(IRValidationError, match="packet_field_value_out_of_range"):
+        _load(data)
+
+
+def test_packet_field_transforms_must_preserve_destination_width() -> None:
+    data = _document()
+    parameters = data["action_parameters"]
+    transforms = data["transforms"]
+    fields = data["packet_fields"]
+    assert (
+        isinstance(parameters, dict) and isinstance(transforms, dict) and isinstance(fields, dict)
+    )
+    strength = parameters["strength"]
+    assert isinstance(strength, dict)
+    strength["values"] = [255]
+    transforms["add"] = {"operation": "ADD", "operand": 1}
+    fields["strength_field"]["transforms"] = ["add"]
+
+    with pytest.raises(IRValidationError, match="packet_field_value_out_of_range"):
+        _load(data)
+
+
 def test_duplicate_discovery_domain_cannot_select_different_protocols() -> None:
     data = _document()
     protocols = data["protocols"]
@@ -670,6 +712,16 @@ def test_packet_builder_must_emit_its_framing_length_field() -> None:
         _load(data)
 
 
+def test_packet_builder_fields_must_not_leave_undefined_bytes() -> None:
+    data = _document()
+    fields = data["packet_fields"]
+    assert isinstance(fields, dict)
+    fields["checksum_field"]["offset"] = 2
+
+    with pytest.raises(IRValidationError, match="packet_builder_field_gap"):
+        _load(data)
+
+
 @pytest.mark.parametrize(
     "exchange",
     [
@@ -689,6 +741,16 @@ def test_challenge_response_requires_executable_exchange(exchange: dict[str, str
     }
 
     with pytest.raises(IRValidationError, match="invalid_authentication_shape"):
+        _load(data)
+
+
+def test_custom_authentication_is_rejected_until_its_mechanics_are_modeled() -> None:
+    data = _document()
+    authentications = data["authentications"]
+    assert isinstance(authentications, dict)
+    authentications["none"] = {"method": "CUSTOM", "selectors": ["remote_code"]}
+
+    with pytest.raises(IRValidationError, match="unsupported_authentication_method"):
         _load(data)
 
 
@@ -726,6 +788,26 @@ def test_fixed_length_parser_rejects_field_beyond_buffer() -> None:
         _load(data)
     fields["state"]["offset"] = 0
     _load(data)
+
+
+def test_parser_outputs_must_belong_to_its_target_selector_domain() -> None:
+    data = _document()
+    fields = data["parser_fields"]
+    assert isinstance(fields, dict)
+    fields["state"]["transforms"] = []
+
+    with pytest.raises(IRValidationError, match="parser_output_outside_selector_domain"):
+        _load(data)
+
+
+def test_parser_lookup_must_cover_every_reachable_raw_value() -> None:
+    data = _document()
+    transforms = data["transforms"]
+    assert isinstance(transforms, dict)
+    transforms["state_lookup"]["lookup"] = [[0, "idle"]]
+
+    with pytest.raises(IRValidationError, match="lookup_domain_incomplete"):
+        _load(data)
 
 
 def test_length_prefixed_buffering_is_rejected_until_semantics_are_modeled() -> None:
@@ -778,6 +860,68 @@ def test_notification_parser_requires_start_notify_lifecycle_phase() -> None:
     lifecycles["command"]["phases"] = ["CONNECT", "WRITE", "DISCONNECT"]
 
     with pytest.raises(IRValidationError, match="notification_lifecycle_missing_start"):
+        _load(data)
+
+
+@pytest.mark.parametrize("authentication_target", ["request_builder", "response_parser"])
+def test_action_mapping_rejects_transport_selector_from_another_variant_space(
+    authentication_target: str,
+) -> None:
+    data = _document()
+    spaces = data["variant_spaces"]
+    selectors = data["selectors"]
+    fields = data["packet_fields"]
+    assert isinstance(spaces, dict) and isinstance(selectors, dict) and isinstance(fields, dict)
+    spaces["other"] = {"dimensions": {"other": [1]}, "constraints": []}
+    selectors["other"] = {
+        "variant_space": "other",
+        "dimension": "other",
+        "kind": "VARIANT",
+        "values": [1],
+    }
+    transports = data["transports"]
+    authentications = data["authentications"]
+    lifecycles = data["lifecycles"]
+    assert isinstance(transports, dict) and isinstance(authentications, dict)
+    assert isinstance(lifecycles, dict)
+    transport = transports["transport"]
+    lifecycle = lifecycles["command"]
+    assert isinstance(transport, dict) and isinstance(lifecycle, dict)
+    lifecycle["phases"] = ["CONNECT", "AUTHENTICATE", "START_NOTIFY", "WRITE", "DISCONNECT"]
+    auth: dict[str, object] = {"method": "PIN", "selectors": ["remote_code"]}
+    if authentication_target == "request_builder":
+        fields["auth_selector"] = {
+            "offset": 0,
+            "width": 1,
+            "source": "SELECTOR",
+            "source_ref": "other",
+            "transforms": [],
+        }
+        builders = data["packet_builders"]
+        assert isinstance(builders, dict)
+        builders["auth_builder"] = {"fields": ["auth_selector"], "framing": "frame"}
+        auth["request_builder"] = "auth_builder"
+    else:
+        transforms = data["transforms"]
+        parser_fields = data["parser_fields"]
+        parsers = data["notification_parsers"]
+        assert isinstance(transforms, dict)
+        assert isinstance(parser_fields, dict) and isinstance(parsers, dict)
+        transforms["other_lookup"] = {
+            "operation": "LOOKUP",
+            "lookup": [[value, 1] for value in range(256)],
+        }
+        parser_fields["auth_state"] = {
+            "offset": 0,
+            "width": 1,
+            "target_selector": "other",
+            "transforms": ["other_lookup"],
+        }
+        parsers["auth_parser"] = {"buffering": "datagram", "fields": ["auth_state"]}
+        auth["response_parser"] = "auth_parser"
+    authentications["none"] = auth
+
+    with pytest.raises(IRValidationError, match="action_mapping_selector_variant_space_mismatch"):
         _load(data)
 
 

@@ -1397,17 +1397,8 @@ def _synthetic_terminal_semantics() -> dict[str, object]:
         },
         "authentications": {"auth": {"method": "PIN", "selectors": ["side"]}},
         "bufferings": {"datagram": {"mode": "DATAGRAM"}},
-        "parser_fields": {
-            "state": {
-                "offset": 0,
-                "width": 1,
-                "target_selector": "side",
-                "transforms": ["identity"],
-            }
-        },
-        "notification_parsers": {
-            "parser": {"buffering": "datagram", "fields": ["state"]}
-        },
+        "parser_fields": {},
+        "notification_parsers": {},
         "timings": {
             "movement": {
                 "repeat_count": 1,
@@ -1433,7 +1424,6 @@ def _synthetic_terminal_semantics() -> dict[str, object]:
                 "characteristic": "write",
                 "write_mode": "WITHOUT_RESPONSE",
                 "packet_builder": "builder",
-                "notification_parser": "parser",
                 "authentication": "auth",
                 "timing": "movement",
                 "lifecycle": "command",
