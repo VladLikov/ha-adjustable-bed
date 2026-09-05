@@ -552,6 +552,19 @@ def test_packet_builder_checksum_range_must_be_emitted_by_builder() -> None:
         _load(data)
 
 
+def test_packet_builder_must_emit_its_framing_length_field() -> None:
+    data = _document()
+    framings = data["framings"]
+    assert isinstance(framings, dict)
+    framings["frame"]["length_field"] = "strength_field"
+    builders = data["packet_builders"]
+    assert isinstance(builders, dict)
+    builders["stop_builder"]["framing"] = "frame"
+
+    with pytest.raises(IRValidationError, match="packet_builder_length_field_missing"):
+        _load(data)
+
+
 @pytest.mark.parametrize(
     "exchange",
     [
@@ -571,6 +584,30 @@ def test_challenge_response_requires_executable_exchange(exchange: dict[str, str
     }
 
     with pytest.raises(IRValidationError, match="invalid_authentication_shape"):
+        _load(data)
+
+
+def test_nontrivial_authentication_requires_lifecycle_phase() -> None:
+    data = _document()
+    authentications = data["authentications"]
+    assert isinstance(authentications, dict)
+    authentications["none"] = {
+        "method": "PIN",
+        "selectors": ["remote_code"],
+        "request_builder": "builder",
+    }
+
+    with pytest.raises(IRValidationError, match="authentication_lifecycle_missing_phase"):
+        _load(data)
+
+
+def test_action_mapping_rejects_packet_parameter_for_another_action() -> None:
+    data = _document()
+    parameters = data["action_parameters"]
+    assert isinstance(parameters, dict)
+    parameters["strength"]["action"] = "stop"
+
+    with pytest.raises(IRValidationError, match="action_mapping_parameter_mismatch"):
         _load(data)
 
 

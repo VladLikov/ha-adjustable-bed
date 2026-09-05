@@ -1411,11 +1411,24 @@ def _validate_final_references(document: FinalProtocolIRDocument) -> None:
             reference("packet_fields", field, f"$.packet_builders.{builder_id}.fields[{index}]")
         reference("framings", builder.framing, f"$.packet_builders.{builder_id}.framing")
         reference("checksums", builder.checksum, f"$.packet_builders.{builder_id}.checksum")
-        builder_fields = tuple(
-            field
+        builder_fields: tuple[PacketField, ...] = tuple(
+            cast(PacketField, collections["packet_fields"][field_id])
             for field_id in builder.fields
-            if isinstance(field := collections["packet_fields"].get(field_id), PacketField)
+            if isinstance(collections["packet_fields"].get(field_id), PacketField)
         )
+        framing = collections["framings"].get(builder.framing)
+        if (
+            isinstance(framing, Framing)
+            and framing.length_field is not None
+            and framing.length_field not in builder.fields
+        ):
+            diagnostics.append(
+                core.IRDiagnostic(
+                    "packet_builder_length_field_missing",
+                    f"$.packet_builders.{builder_id}.framing",
+                    "packet builder must emit its framing's declared length field",
+                )
+            )
         if builder.checksum is not None and not any(
             field.source is PacketFieldSource.CHECKSUM
             and field.source_ref == builder.checksum
@@ -1530,6 +1543,7 @@ def _validate_final_references(document: FinalProtocolIRDocument) -> None:
         reference("lifecycles", transport.lifecycle, f"$.transports.{transport_id}.lifecycle")
         char = collections["gatt_characteristics"].get(transport.characteristic)
         lifecycle = collections["lifecycles"].get(transport.lifecycle)
+        authentication = collections["authentications"].get(transport.authentication or "")
         if (
             isinstance(char, GattCharacteristic) and transport.notification_parser is not None
             and not {GattCharacteristicRole.NOTIFY, GattCharacteristicRole.INDICATE}.intersection(char.roles)
@@ -1550,6 +1564,19 @@ def _validate_final_references(document: FinalProtocolIRDocument) -> None:
                     "notification parsing requires a START_NOTIFY lifecycle phase",
                 )
             )
+        if (
+            isinstance(authentication, Authentication)
+            and authentication.method is not AuthenticationMethod.NONE
+            and isinstance(lifecycle, Lifecycle)
+            and LifecyclePhase.AUTHENTICATE not in lifecycle.phases
+        ):
+            diagnostics.append(
+                core.IRDiagnostic(
+                    "authentication_lifecycle_missing_phase",
+                    f"$.transports.{transport_id}.lifecycle",
+                    "nontrivial authentication requires an AUTHENTICATE lifecycle phase",
+                )
+            )
         if isinstance(char, GattCharacteristic) and transport.write_mode not in char.write_modes:
             diagnostics.append(
                 core.IRDiagnostic(
@@ -1564,6 +1591,30 @@ def _validate_final_references(document: FinalProtocolIRDocument) -> None:
         reference("protocols", mapping.protocol, f"$.action_mappings.{mapping_id}.protocol")
         reference("actions", mapping.action, f"$.action_mappings.{mapping_id}.action")
         reference("transports", mapping.transport, f"$.action_mappings.{mapping_id}.transport")
+        transport = collections["transports"].get(mapping.transport)
+        builder = (
+            collections["packet_builders"].get(transport.packet_builder)
+            if isinstance(transport, Transport)
+            else None
+        )
+        if isinstance(builder, PacketBuilder):
+            for field_id in builder.fields:
+                field = collections["packet_fields"].get(field_id)
+                parameter = (
+                    collections["action_parameters"].get(field.source_ref or "")
+                    if isinstance(field, PacketField)
+                    and field.source is PacketFieldSource.ACTION_PARAMETER
+                    else None
+                )
+                if isinstance(parameter, ActionParameter) and parameter.action != mapping.action:
+                    diagnostics.append(
+                        core.IRDiagnostic(
+                            "action_mapping_parameter_mismatch",
+                            f"$.action_mappings.{mapping_id}.transport",
+                            f"packet field {field_id!r} references a parameter for action "
+                            f"{parameter.action!r}",
+                        )
+                    )
         protocol = protocols.get(mapping.protocol)
         if protocol is not None:
             dimensions = dict(

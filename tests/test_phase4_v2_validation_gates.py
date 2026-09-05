@@ -54,6 +54,7 @@ from tools.phase4_v2.orchestration import (
     package_audit_unit_id,
     stage_authority_capability,
 )
+from tools.phase4_v2.preflight import WarningRecord
 from tools.phase4_v2.queue import Queue, QueueConflictError
 from tools.phase4_v2.reconciliation import (
     CanonicalValue,
@@ -79,6 +80,7 @@ from tools.phase4_v2.validation import (
     WarningStatus,
     candidate_occurrence_id,
     validate_completion,
+    warning_occurrence_id,
 )
 
 
@@ -653,6 +655,48 @@ def test_warning_disposition_set_and_blocking_status_fail_closed(case: _Case) ->
     )
 
     assert {"WARNING_SET_MISMATCH", "WARNING_BLOCKING"} <= _codes(changed)
+
+
+@pytest.mark.parametrize("status", [WarningStatus.ACCEPTED, WarningStatus.RESOLVED])
+def test_warning_disposition_requires_authenticated_evidence(
+    case: _Case, status: WarningStatus
+) -> None:
+    preparation = case.target.authenticated.preparation_receipt
+    invocation = preparation.invocations[0]
+    text = "WARNING: incomplete decompilation"
+    warning = WarningRecord("stderr", 1, text, _sha(text))
+    changed_invocation = replace(
+        invocation,
+        status="FALLBACK",
+        warnings=(warning,),
+        failures=(),
+        fallback_route="missing",
+        fallback_reason="JADX_DECOMPILATION_FAILED",
+    )
+    object.__setattr__(
+        preparation,
+        "invocations",
+        (changed_invocation, *preparation.invocations[1:]),
+    )
+    adapter = CompletionAdapter(
+        case.adapter.target_package_ref_id,
+        case.adapter.candidate_links,
+        (
+            WarningDisposition(
+                warning_occurrence_id(changed_invocation, warning),
+                status,
+                "reviewed",
+                _sha("unsupported warning disposition"),
+            ),
+        ),
+    )
+    changed = replace(
+        case,
+        adapter=adapter,
+        pins=replace(case.pins, completion_adapter_sha256=adapter.content_id),
+    )
+
+    assert "WARNING_EVIDENCE_UNAUTHENTICATED" in _codes(changed)
 
 
 @pytest.mark.parametrize(

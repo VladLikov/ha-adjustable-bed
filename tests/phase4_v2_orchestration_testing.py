@@ -1393,7 +1393,6 @@ def _synthetic_terminal_semantics() -> dict[str, object]:
             "builder": {
                 "fields": ["command"],
                 "framing": "frame",
-                "checksum": "checksum",
             }
         },
         "authentications": {"auth": {"method": "PIN", "selectors": ["side"]}},
@@ -1418,7 +1417,17 @@ def _synthetic_terminal_semantics() -> dict[str, object]:
                 "release_action": "stop",
             }
         },
-        "lifecycles": {"command": {"phases": ["CONNECT", "WRITE", "DISCONNECT"]}},
+        "lifecycles": {
+            "command": {
+                "phases": [
+                    "CONNECT",
+                    "AUTHENTICATE",
+                    "START_NOTIFY",
+                    "WRITE",
+                    "DISCONNECT",
+                ]
+            }
+        },
         "transports": {
             "transport": {
                 "characteristic": "write",

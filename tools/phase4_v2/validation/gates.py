@@ -74,6 +74,7 @@ from .model import (
     Diagnostic,
     ValidationError,
     ValidationPins,
+    WarningDisposition,
     WarningStatus,
     candidate_occurrence_id,
     warning_occurrence_id,
@@ -445,6 +446,44 @@ def _validate_preparation_plan_binding(
         findings.add("PREPARATION_CAPABILITY_MISMATCH", "/execution_plan/preparation/capabilities")
 
 
+def _warning_evidence_digests(
+    preparation: PreparationReceipt,
+    package_local_evidence: AuthenticatedPackageLocalEvidence,
+    *,
+    package_local_evidence_authenticated: bool,
+) -> dict[str, set[str]]:
+    """Resolve warning dispositions to authenticated bytes or their exact fallback."""
+
+    local_digests = (
+        {member.sha256 for member in package_local_evidence.members}
+        if package_local_evidence_authenticated
+        and type(package_local_evidence) is AuthenticatedPackageLocalEvidence
+        else set()
+    )
+    result: dict[str, set[str]] = {}
+    if type(preparation) is not PreparationReceipt:
+        return result
+    for invocation in preparation.invocations:
+        fallback_digests: set[str] = set()
+        if invocation.status == "FALLBACK" and invocation.fallback_route is not None:
+            fallbacks = tuple(
+                candidate
+                for candidate in preparation.invocations
+                if candidate.member == invocation.member
+                and candidate.route == invocation.fallback_route
+                and candidate.status == "COMPLETE"
+            )
+            if len(fallbacks) == 1:
+                fallback_digests.update(output.sha256 for output in fallbacks[0].outputs)
+        for warning in invocation.warnings:
+            try:
+                occurrence_id = warning_occurrence_id(invocation, warning)
+            except ValidationError:
+                continue
+            result[occurrence_id] = local_digests | fallback_digests
+    return result
+
+
 def _reconciliation_ledgers(
     result: ReconciliationResult, target: str, findings: _Findings
 ) -> tuple[set[str], set[str], set[str]]:
@@ -550,7 +589,7 @@ def _validate_completion(
         findings.add("ADAPTER_TYPE_INVALID", "/adapter")
         candidate_links: set[str] = set()
         linked_items: set[str] = set()
-        warning_dispositions: dict[str, WarningStatus] = {}
+        warning_dispositions: dict[str, WarningDisposition] = {}
     else:
         if findings.guard("ADAPTER_INVALID", "/adapter", adapter.__post_init__) is None and any(
             item.code == "ADAPTER_INVALID" for item in findings.items
@@ -560,7 +599,7 @@ def _validate_completion(
             candidate_links = {item.occurrence_id for item in adapter.candidate_links}
             linked_items = {item.report_item_id for item in adapter.candidate_links}
             warning_dispositions = {
-                item.occurrence_id: item.status for item in adapter.warning_dispositions
+                item.occurrence_id: item for item in adapter.warning_dispositions
             }
 
     expected_candidates, expected_warnings = _validate_preparation(preparation, findings)
@@ -655,8 +694,22 @@ def _validate_completion(
         findings.add("CANDIDATE_REPORT_SET_MISMATCH", "/adapter/candidate_links")
     if set(warning_dispositions) != expected_warnings:
         findings.add("WARNING_SET_MISMATCH", "/adapter/warning_dispositions")
-    if any(status is WarningStatus.BLOCKING for status in warning_dispositions.values()):
+    if any(
+        disposition.status is WarningStatus.BLOCKING
+        for disposition in warning_dispositions.values()
+    ):
         findings.add("WARNING_BLOCKING", "/adapter/warning_dispositions")
+    warning_evidence = _warning_evidence_digests(
+        preparation,
+        package_local_evidence,
+        package_local_evidence_authenticated=derivation is not None,
+    )
+    if any(
+        disposition.status is not WarningStatus.BLOCKING
+        and disposition.evidence_sha256 not in warning_evidence.get(occurrence_id, set())
+        for occurrence_id, disposition in warning_dispositions.items()
+    ):
+        findings.add("WARNING_EVIDENCE_UNAUTHENTICATED", "/adapter/warning_dispositions")
 
     if type(validated_output) is not ValidatedPackageOutput or authenticated_output is None:
         findings.add("VALIDATED_OUTPUT_TYPE_INVALID", "/validated_output")
