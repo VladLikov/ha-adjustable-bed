@@ -21,6 +21,7 @@ from .core import (
     ORCHESTRATION_TRACKER_PUBLICATION_KIND,
     Lease,
     Queue,
+    QueueConflictError,
     QueueSnapshot,
     _TrackerPublicationCheckpointGrant,
 )
@@ -131,6 +132,8 @@ def publish_tracker_fanout(
     endpoint = (gateway.repository, gateway.branch)
     if endpoint != (config.repository, config.branch):
         raise PublisherConflictError("tracker gateway endpoint does not match publication config")
+    if queue._leased_unit_kind(lease) != ORCHESTRATION_TRACKER_PUBLICATION_KIND:
+        raise QueueConflictError("tracker publication requires a tracker-publication lease")
     paths = tuple(item.path for item in canonical_targets)
     config_sha256 = config.sha256
     with _publication_guard(queue), _publication_heartbeat(queue, lease):

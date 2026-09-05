@@ -532,6 +532,48 @@ def test_packet_builder_checksum_must_match_its_checksum_field() -> None:
         _load(data)
 
 
+def test_packet_builder_checksum_requires_a_matching_output_field() -> None:
+    data = _document()
+    builders = data["packet_builders"]
+    assert isinstance(builders, dict)
+    builders["builder"]["fields"] = ["strength_field"]
+
+    with pytest.raises(IRValidationError, match="packet_builder_checksum_mismatch"):
+        _load(data)
+
+
+def test_packet_builder_checksum_range_must_be_emitted_by_builder() -> None:
+    data = _document()
+    checksums = data["checksums"]
+    assert isinstance(checksums, dict)
+    checksums["checksum"]["end_byte"] = 100
+
+    with pytest.raises(IRValidationError, match="checksum_range_out_of_bounds"):
+        _load(data)
+
+
+@pytest.mark.parametrize(
+    "exchange",
+    [
+        {},
+        {"request_builder": "builder"},
+        {"response_parser": "parser"},
+    ],
+)
+def test_challenge_response_requires_executable_exchange(exchange: dict[str, str]) -> None:
+    data = _document()
+    authentications = data["authentications"]
+    assert isinstance(authentications, dict)
+    authentications["none"] = {
+        "method": "CHALLENGE_RESPONSE",
+        "selectors": ["remote_code"],
+        **exchange,
+    }
+
+    with pytest.raises(IRValidationError, match="invalid_authentication_shape"):
+        _load(data)
+
+
 def test_fixed_length_parser_rejects_field_beyond_buffer() -> None:
     data = _document()
     data["bufferings"] = {"datagram": {"mode": "FIXED_LENGTH", "size": 1}}
@@ -577,6 +619,16 @@ def test_notification_parser_accepts_indicate_role() -> None:
     assert isinstance(characteristics, dict)
     characteristics["write"]["roles"] = ["WRITE", "INDICATE"]
     _load(data)
+
+
+def test_notification_parser_requires_start_notify_lifecycle_phase() -> None:
+    data = _document()
+    lifecycles = data["lifecycles"]
+    assert isinstance(lifecycles, dict)
+    lifecycles["command"]["phases"] = ["CONNECT", "WRITE", "DISCONNECT"]
+
+    with pytest.raises(IRValidationError, match="notification_lifecycle_missing_start"):
+        _load(data)
 
 
 def test_final_markdown_is_deterministic_and_rejects_drift() -> None:

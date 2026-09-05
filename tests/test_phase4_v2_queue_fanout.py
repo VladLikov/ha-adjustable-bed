@@ -10,6 +10,8 @@ import pytest
 
 import tools.phase4_v2.queue.fanout as fanout_module
 from tools.phase4_v2.queue import (
+    ORCHESTRATION_PACKAGE_ANALYSIS_KIND,
+    ORCHESTRATION_TRACKER_PUBLICATION_KIND,
     FanoutPublishReceipt,
     GitHubTreeGateway,
     Lease,
@@ -56,9 +58,11 @@ class _MemorySetGateway:
         self.documents: dict[str, bytes] = {}
         self.reject = False
         self.corrupt_readback = False
+        self.reads = 0
         self.writes = 0
 
     def read(self, paths: tuple[str, ...]) -> TrackerDocumentSet:
+        self.reads += 1
         documents = tuple(
             TrackerDocument(
                 path,
@@ -111,12 +115,17 @@ def _sealed_gateway(
 
 
 @pytest.fixture
-def publisher(tmp_path: Path) -> tuple[Queue, Lease]:
+def publisher(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Queue, Lease]:
     queue = Queue(tmp_path / "state" / "queue.sqlite3", tmp_path / "attempts")
     queue.initialize()
     queue.enqueue("publisher", kind="tracker", input_digest="c" * 64)
     lease = queue.claim("publisher")
     assert lease is not None
+    monkeypatch.setattr(
+        queue,
+        "_leased_unit_kind",
+        lambda _lease: ORCHESTRATION_TRACKER_PUBLICATION_KIND,
+    )
     return queue, lease
 
 
@@ -144,6 +153,27 @@ def test_fanout_publishes_markdown_and_html_from_one_snapshot(
         fanout_module._authenticate_tracker_fanout_receipt(queue, sealed, _CONFIG, receipt)
         == receipt
     )
+
+
+def test_fanout_rejects_non_publication_lease_before_gateway_access(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    queue = Queue(tmp_path / "state" / "queue.sqlite3", tmp_path / "attempts")
+    queue.initialize()
+    queue.enqueue(
+        "analysis",
+        kind=ORCHESTRATION_PACKAGE_ANALYSIS_KIND,
+        input_digest="c" * 64,
+    )
+    lease = queue.claim("analysis")
+    assert lease is not None
+    backend = _MemorySetGateway()
+
+    with pytest.raises(QueueConflictError, match="tracker-publication lease"):
+        publish_tracker_fanout(queue, lease, _sealed_gateway(monkeypatch, backend), _CONFIG)
+    assert backend.reads == 0
+    assert backend.writes == 0
 
 
 @pytest.mark.parametrize("already_current", [False, True])

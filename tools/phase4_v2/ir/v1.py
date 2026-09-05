@@ -1095,6 +1095,14 @@ def _parse_authentication(raw: object, path: str) -> Authentication:
         core._fail(
             "invalid_authentication_shape", path, "NONE authentication cannot declare inputs"
         )
+    if method is AuthenticationMethod.CHALLENGE_RESPONSE and (
+        request is None or response is None
+    ):
+        core._fail(
+            "invalid_authentication_shape",
+            path,
+            "CHALLENGE_RESPONSE authentication requires a request builder and response parser",
+        )
     return Authentication(method, selectors, request, response)
 
 
@@ -1403,6 +1411,23 @@ def _validate_final_references(document: FinalProtocolIRDocument) -> None:
             reference("packet_fields", field, f"$.packet_builders.{builder_id}.fields[{index}]")
         reference("framings", builder.framing, f"$.packet_builders.{builder_id}.framing")
         reference("checksums", builder.checksum, f"$.packet_builders.{builder_id}.checksum")
+        builder_fields = tuple(
+            field
+            for field_id in builder.fields
+            if isinstance(field := collections["packet_fields"].get(field_id), PacketField)
+        )
+        if builder.checksum is not None and not any(
+            field.source is PacketFieldSource.CHECKSUM
+            and field.source_ref == builder.checksum
+            for field in builder_fields
+        ):
+            diagnostics.append(
+                core.IRDiagnostic(
+                    "packet_builder_checksum_mismatch",
+                    f"$.packet_builders.{builder_id}.checksum",
+                    "packet builder checksum requires a matching checksum field",
+                )
+            )
         for index, field_id in enumerate(builder.fields):
             field = collections["packet_fields"].get(field_id)
             if (
@@ -1417,16 +1442,23 @@ def _validate_final_references(document: FinalProtocolIRDocument) -> None:
                         "checksum field must reference the packet builder's declared checksum",
                     )
                 )
-        fields = sorted(
-            (field.offset, field.offset + field.width)
-            for field_id in builder.fields
-            if isinstance(field := collections["packet_fields"].get(field_id), PacketField)
-        )
+        fields = sorted((field.offset, field.offset + field.width) for field in builder_fields)
         if any(right[0] < left[1] for left, right in zip(fields, fields[1:], strict=False)):
             diagnostics.append(core.IRDiagnostic(
                 "overlapping_packet_fields", f"$.packet_builders.{builder_id}.fields",
                 "packet builder fields must occupy disjoint byte ranges",
             ))
+        checksum = collections["checksums"].get(builder.checksum or "")
+        if isinstance(checksum, Checksum) and checksum.end_byte > max(
+            (end for _start, end in fields), default=0
+        ):
+            diagnostics.append(
+                core.IRDiagnostic(
+                    "checksum_range_out_of_bounds",
+                    f"$.packet_builders.{builder_id}.checksum",
+                    "checksum range extends beyond the packet builder output",
+                )
+            )
     for auth_id, auth in document.authentications:
         for index, selector in enumerate(auth.selectors):
             reference("selectors", selector, f"$.authentications.{auth_id}.selectors[{index}]")
@@ -1497,6 +1529,7 @@ def _validate_final_references(document: FinalProtocolIRDocument) -> None:
         reference("timings", transport.timing, f"$.transports.{transport_id}.timing")
         reference("lifecycles", transport.lifecycle, f"$.transports.{transport_id}.lifecycle")
         char = collections["gatt_characteristics"].get(transport.characteristic)
+        lifecycle = collections["lifecycles"].get(transport.lifecycle)
         if (
             isinstance(char, GattCharacteristic) and transport.notification_parser is not None
             and not {GattCharacteristicRole.NOTIFY, GattCharacteristicRole.INDICATE}.intersection(char.roles)
@@ -1505,6 +1538,18 @@ def _validate_final_references(document: FinalProtocolIRDocument) -> None:
                 "notification_role_missing", f"$.transports.{transport_id}.notification_parser",
                 "notification parsing requires a NOTIFY or INDICATE characteristic",
             ))
+        if (
+            transport.notification_parser is not None
+            and isinstance(lifecycle, Lifecycle)
+            and LifecyclePhase.START_NOTIFY not in lifecycle.phases
+        ):
+            diagnostics.append(
+                core.IRDiagnostic(
+                    "notification_lifecycle_missing_start",
+                    f"$.transports.{transport_id}.lifecycle",
+                    "notification parsing requires a START_NOTIFY lifecycle phase",
+                )
+            )
         if isinstance(char, GattCharacteristic) and transport.write_mode not in char.write_modes:
             diagnostics.append(
                 core.IRDiagnostic(

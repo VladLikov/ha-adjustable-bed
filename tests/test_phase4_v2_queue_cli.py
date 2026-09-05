@@ -14,6 +14,7 @@ import tools.phase4_v2.queue.cli as queue_cli
 import tools.phase4_v2.queue.fanout as fanout_module
 import tools.phase4_v2.queue.github_tree as github_tree
 from tools.phase4_v2.queue import (
+    ORCHESTRATION_TRACKER_PUBLICATION_KIND,
     CommandResult,
     ExecutionMode,
     GitHubTreeGateway,
@@ -536,6 +537,11 @@ def test_cli_publishes_complete_target_set_and_emits_canonical_receipt(
         lambda: config.sha256,
     )
     monkeypatch.setattr(
+        Queue,
+        "_leased_unit_kind",
+        lambda _self, _lease: ORCHESTRATION_TRACKER_PUBLICATION_KIND,
+    )
+    monkeypatch.setattr(
         GitHubTreeGateway,
         "read",
         lambda _self, paths: gateway.read(paths),
@@ -611,6 +617,11 @@ def test_cli_fails_closed_when_tracker_branch_is_missing(
         fanout_module,
         "_load_protected_publication_config_sha256",
         lambda: config.sha256,
+    )
+    monkeypatch.setattr(
+        Queue,
+        "_leased_unit_kind",
+        lambda _self, _lease: ORCHESTRATION_TRACKER_PUBLICATION_KIND,
     )
     monkeypatch.setattr(github_tree, "_run_gh", runner)
 

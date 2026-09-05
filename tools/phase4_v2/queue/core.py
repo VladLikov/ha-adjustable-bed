@@ -2193,6 +2193,19 @@ class Queue:
             raise QueueConflictError("lease is not an authenticated orchestration stage")
         return str(row["kind"]), str(row["cluster_id"])
 
+    def _leased_unit_kind(self, lease: Lease) -> str:
+        """Return the immutable kind for a live leased work unit."""
+
+        with self._connect() as connection:
+            self._require_live_lease(connection, lease)
+            row = connection.execute(
+                "SELECT kind FROM work_units WHERE unit_id = ?",
+                (lease.unit_id,),
+            ).fetchone()
+        if row is None:
+            raise QueueConflictError("leased work unit disappeared")
+        return str(row["kind"])
+
     def finish_input_mismatch_if_input_changed(
         self,
         lease: Lease,
