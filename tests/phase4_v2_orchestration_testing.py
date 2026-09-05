@@ -1387,15 +1387,32 @@ def _synthetic_terminal_semantics() -> dict[str, object]:
                 "source": "CONSTANT",
                 "constant_hex": "01",
                 "transforms": ["identity"],
-            }
+            },
+            "auth_value": {
+                "offset": 0,
+                "width": 1,
+                "source": "AUTHENTICATION",
+                "source_ref": "auth",
+                "transforms": ["identity"],
+            },
         },
         "packet_builders": {
             "builder": {
                 "fields": ["command"],
                 "framing": "frame",
+            },
+            "auth_builder": {
+                "fields": ["auth_value"],
+                "framing": "frame",
+            },
+        },
+        "authentications": {
+            "auth": {
+                "method": "PIN",
+                "selectors": ["side"],
+                "request_builder": "auth_builder",
             }
         },
-        "authentications": {"auth": {"method": "PIN", "selectors": ["side"]}},
         "bufferings": {"datagram": {"mode": "DATAGRAM"}},
         "parser_fields": {},
         "notification_parsers": {},

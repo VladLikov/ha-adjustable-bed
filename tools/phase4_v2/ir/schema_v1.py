@@ -138,6 +138,13 @@ _FINAL_DEFINITIONS: dict[str, object] = {
             "field": _enum(MatchField),
             "operation": _enum(MatchOperation),
             "value": {"type": "string", "minLength": 1, "maxLength": 4096},
+            "value_hex": {**_HEX, "minLength": 2, "maxLength": 4096},
+            "key": {
+                "oneOf": [
+                    {"type": "integer", "minimum": 0, "maximum": 65535},
+                    _UUID,
+                ]
+            },
         },
     ),
     "gatt_services_map": _map("gatt_service"),

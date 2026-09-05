@@ -13,10 +13,13 @@ from typing import ClassVar, cast
 
 from . import model as core
 
-FINAL_SCHEMA_REVISION = "phase4-protocol-ir-v1.3.0-2026-09-05"
+FINAL_SCHEMA_REVISION = "phase4-protocol-ir-v1.4.0-2026-09-06"
 _MAX_DEFINITIONS = 250_000
 _MAX_REFERENCES = 4_096
 _MAX_DOMAIN_EXPANSIONS = 1_000_000
+_SAFE_DISCOVERY_REGEX = re.compile(
+    r"\^?(?:(?:\\.)|(?:\[(?:\\.|[^\]\\])+\])|[^\\[\]().*+?{}|^$])*\$?"
+)
 
 
 class SelectorKind(StrEnum):
@@ -143,11 +146,18 @@ class DiscoveryMatcher:
     field: MatchField
     operation: MatchOperation
     value: str | None
+    key: int | str | None
 
     def to_data(self) -> dict[str, object]:
         data: dict[str, object] = {"field": self.field.value, "operation": self.operation.value}
         if self.value is not None:
-            data["value"] = self.value
+            data[
+                "value_hex"
+                if self.field in {MatchField.MANUFACTURER_DATA, MatchField.SERVICE_DATA}
+                else "value"
+            ] = self.value
+        if self.key is not None:
+            data["key"] = self.key
         return data
 
 
@@ -891,27 +901,77 @@ def _parse_discovery_rule(raw: object, path: str) -> DiscoveryRule:
 
 
 def _parse_discovery_matcher(raw: object, path: str) -> DiscoveryMatcher:
-    value = _object(raw, path, {"field", "operation"}, {"value"})
+    value = _object(raw, path, {"field", "operation"}, {"key", "value", "value_hex"})
+    field = _enum(MatchField, value["field"], f"{path}.field")
     operation = _enum(MatchOperation, value["operation"], f"{path}.operation")
-    candidate = (
-        core._expect_nonempty_string(value["value"], f"{path}.value", max_length=4096)
-        if "value" in value
-        else None
-    )
+    binary_field = field in {MatchField.MANUFACTURER_DATA, MatchField.SERVICE_DATA}
+    candidate = None
+    candidate_key = "value_hex" if binary_field else "value"
+    invalid_candidate_key = "value" if binary_field else "value_hex"
+    if invalid_candidate_key in value:
+        core._fail(
+            "invalid_discovery_matcher",
+            f"{path}.{invalid_candidate_key}",
+            f"{field.value} uses {candidate_key}",
+        )
+    if candidate_key in value:
+        candidate = core._expect_nonempty_string(
+            value[candidate_key], f"{path}.{candidate_key}", max_length=4096
+        )
+        if binary_field:
+            candidate = _hex(candidate, f"{path}.value_hex", allow_empty=False)
     if (operation is MatchOperation.PRESENT) != (candidate is None):
         core._fail(
             "invalid_discovery_matcher",
             path,
             "PRESENT omits value; every other operation requires it",
         )
+    key: int | str | None = None
+    if field is MatchField.MANUFACTURER_DATA:
+        if "key" not in value:
+            core._fail(
+                "invalid_discovery_matcher",
+                path,
+                "MANUFACTURER_DATA requires its numeric manufacturer ID key",
+            )
+        key = core._expect_integer(value["key"], f"{path}.key", minimum=0)
+        if key > 0xFFFF:
+            core._fail(
+                "invalid_discovery_matcher", f"{path}.key", "manufacturer ID exceeds 16 bits"
+            )
+    elif field is MatchField.SERVICE_DATA:
+        if "key" not in value:
+            core._fail(
+                "invalid_discovery_matcher",
+                path,
+                "SERVICE_DATA requires its service UUID key",
+            )
+        key = _canonical_gatt_uuid(value["key"], f"{path}.key")
+    elif "key" in value:
+        core._fail(
+            "invalid_discovery_matcher",
+            f"{path}.key",
+            "only keyed binary advertisement fields accept a key",
+        )
+    if binary_field and operation is MatchOperation.REGEX:
+        core._fail(
+            "invalid_discovery_matcher",
+            f"{path}.operation",
+            "binary advertisement fields use lowercase hexadecimal EQUALS or PREFIX values",
+        )
     if operation is MatchOperation.REGEX and candidate is not None:
+        if _SAFE_DISCOVERY_REGEX.fullmatch(candidate) is None:
+            core._fail(
+                "unsafe_discovery_regex",
+                f"{path}.{candidate_key}",
+                "regex must be a bounded sequence of literals, escapes, character classes, and "
+                "optional anchors",
+            )
         try:
             re.compile(candidate)
         except re.error as error:
-            core._fail("invalid_discovery_regex", f"{path}.value", str(error))
-    return DiscoveryMatcher(
-        _enum(MatchField, value["field"], f"{path}.field"), operation, candidate
-    )
+            core._fail("invalid_discovery_regex", f"{path}.{candidate_key}", str(error))
+    return DiscoveryMatcher(field, operation, candidate, key)
 
 
 def _discovery_domains_may_overlap(
@@ -929,6 +989,8 @@ def _discovery_domains_may_overlap(
 
 
 def _matchers_may_share_value(left: DiscoveryMatcher, right: DiscoveryMatcher) -> bool:
+    if left.key != right.key:
+        return False
     if MatchOperation.PRESENT in {left.operation, right.operation}:
         return True
     if left.operation is MatchOperation.EQUALS and right.operation is MatchOperation.EQUALS:
@@ -971,6 +1033,15 @@ def _gatt_uuid(raw: object, path: str) -> str:
     ):
         core._fail("invalid_gatt_uuid", path, "expected a 16, 32, or canonical 128-bit UUID")
     return value.lower()
+
+
+def _canonical_gatt_uuid(raw: object, path: str) -> str:
+    value = _gatt_uuid(raw, path)
+    if len(value) == 4:
+        value = f"0000{value}"
+    if len(value) == 8:
+        return f"{value}-0000-1000-8000-00805f9b34fb"
+    return value
 
 
 def _parse_gatt_service(raw: object, path: str) -> GattService:
@@ -1147,6 +1218,18 @@ def _parse_authentication(raw: object, path: str) -> Authentication:
             "invalid_authentication_shape",
             path,
             "CHALLENGE_RESPONSE authentication requires a request builder and response parser",
+        )
+    if method is AuthenticationMethod.PIN and request is None:
+        core._fail(
+            "invalid_authentication_shape",
+            path,
+            "PIN authentication requires a request builder",
+        )
+    if method is AuthenticationMethod.SESSION_TOKEN:
+        core._fail(
+            "unsupported_authentication_method",
+            path,
+            "SESSION_TOKEN requires token extraction semantics that final v1 does not model",
         )
     if method is AuthenticationMethod.CUSTOM:
         core._fail(
@@ -1325,6 +1408,14 @@ def _validate_final_references(document: FinalProtocolIRDocument) -> None:
                 )
             )
 
+    def builder_uses_authentication(builder: object, auth_id: str) -> bool:
+        return isinstance(builder, PacketBuilder) and any(
+            isinstance(field := collections["packet_fields"].get(field_id), PacketField)
+            and field.source is PacketFieldSource.AUTHENTICATION
+            and field.source_ref == auth_id
+            for field_id in builder.fields
+        )
+
     for selector_id, selector in document.selectors:
         reference(
             "variant_spaces", selector.variant_space, f"$.selectors.{selector_id}.variant_space"
@@ -1370,21 +1461,29 @@ def _validate_final_references(document: FinalProtocolIRDocument) -> None:
             )
         )
     protocols = cast(dict[str, core.ProtocolDefinition], collections["protocols"])
+    discovery_selection_ids = {rule.selection_rule for _, rule in document.discovery_rules}
     for rule_id, rule in document.selection_rules:
         reference("protocols", rule.protocol, f"$.selection_rules.{rule_id}.protocol")
         protocol = protocols.get(rule.protocol)
         if protocol is not None:
+            space = cast(core.VariantSpace, collections["variant_spaces"][protocol.variant_space])
             diagnostics.extend(
                 core._predicate_diagnostics(
                     rule.when,
-                    dict(
-                        cast(
-                            core.VariantSpace, collections["variant_spaces"][protocol.variant_space]
-                        ).dimensions
-                    ),
+                    dict(space.dimensions),
                     f"$.selection_rules.{rule_id}.when",
                 )
             )
+            if rule_id in discovery_selection_ids and not any(
+                rule.when.matches(dict(profile)) for profile in space.iter_profiles()
+            ):
+                diagnostics.append(
+                    core.IRDiagnostic(
+                        "unreachable_discovery_selection",
+                        f"$.selection_rules.{rule_id}.when",
+                        "discovery selection predicate matches no valid protocol profile",
+                    )
+                )
     for rule_id, rule in document.discovery_rules:
         reference(
             "selection_rules", rule.selection_rule, f"$.discovery_rules.{rule_id}.selection_rule"
@@ -1428,6 +1527,26 @@ def _validate_final_references(document: FinalProtocolIRDocument) -> None:
             selector = collections["selectors"].get(field.source_ref or "")
             if isinstance(selector, SelectorDefinition):
                 source_domain = selector.values
+        if field.width > 1 and field.source in {
+            PacketFieldSource.ACTION_PARAMETER,
+            PacketFieldSource.SELECTOR,
+            PacketFieldSource.AUTHENTICATION,
+        }:
+            byte_orders = [
+                transform_id
+                for transform_id in field.transforms
+                if isinstance(definition := collections["transforms"].get(transform_id), Transform)
+                and definition.operation
+                in {TransformOperation.LITTLE_ENDIAN, TransformOperation.BIG_ENDIAN}
+            ]
+            if len(byte_orders) != 1:
+                diagnostics.append(
+                    core.IRDiagnostic(
+                        "packet_field_byte_order_missing",
+                        f"$.packet_fields.{field_id}.transforms",
+                        "multibyte dynamic fields require exactly one explicit byte-order transform",
+                    )
+                )
         for index, transform in enumerate(field.transforms):
             reference("transforms", transform, f"$.packet_fields.{field_id}.transforms[{index}]")
             definition = collections["transforms"].get(transform)
@@ -1444,21 +1563,36 @@ def _validate_final_references(document: FinalProtocolIRDocument) -> None:
                         "arithmetic transform operand does not fit the target field width",
                     )
                 )
-            if (
-                source_domain is not None
-                and isinstance(definition, Transform)
-                and definition.operation in {TransformOperation.ADD, TransformOperation.XOR}
-                and type(definition.operand) is int
-                and all(type(value) is int for value in source_domain)
-            ):
-                operand = definition.operand
-                source_domain = tuple(
-                    value + operand
-                    if definition.operation is TransformOperation.ADD
-                    else value ^ operand
-                    for value in source_domain
-                    if type(value) is int
-                )
+            if source_domain is not None and isinstance(definition, Transform):
+                requires_numeric_input = definition.operation in {
+                    TransformOperation.ADD,
+                    TransformOperation.XOR,
+                    TransformOperation.REVERSE,
+                    TransformOperation.LITTLE_ENDIAN,
+                    TransformOperation.BIG_ENDIAN,
+                }
+                if requires_numeric_input and not all(
+                    type(value) is int for value in source_domain
+                ):
+                    diagnostics.append(
+                        core.IRDiagnostic(
+                            "invalid_transform_input_domain",
+                            f"$.packet_fields.{field_id}.transforms[{index}]",
+                            f"{definition.operation.value} requires numeric input values",
+                        )
+                    )
+                elif (
+                    definition.operation in {TransformOperation.ADD, TransformOperation.XOR}
+                    and type(definition.operand) is int
+                ):
+                    operand = definition.operand
+                    source_domain = tuple(
+                        value + operand
+                        if definition.operation is TransformOperation.ADD
+                        else value ^ operand
+                        for value in source_domain
+                        if type(value) is int
+                    )
             if (
                 source_domain is not None
                 and isinstance(definition, Transform)
@@ -1620,6 +1754,19 @@ def _validate_final_references(document: FinalProtocolIRDocument) -> None:
             auth.response_parser,
             f"$.authentications.{auth_id}.response_parser",
         )
+        request_builder = collections["packet_builders"].get(auth.request_builder or "")
+        if (
+            auth.method is AuthenticationMethod.PIN
+            and isinstance(request_builder, PacketBuilder)
+            and not builder_uses_authentication(request_builder, auth_id)
+        ):
+            diagnostics.append(
+                core.IRDiagnostic(
+                    "authentication_exchange_missing_credential",
+                    f"$.authentications.{auth_id}.request_builder",
+                    "PIN request builder must emit a field sourced from this authentication",
+                )
+            )
     for field_id, field in document.parser_fields:
         reference("selectors", field.target_selector, f"$.parser_fields.{field_id}.target_selector")
         bit_width = field.width * 8
@@ -1649,40 +1796,55 @@ def _validate_final_references(document: FinalProtocolIRDocument) -> None:
                         "arithmetic transform operand does not fit the target field width",
                     )
                 )
-            if (
-                isinstance(definition, Transform)
-                and definition.operation in {TransformOperation.ADD, TransformOperation.XOR}
-                and type(definition.operand) is int
-                and all(type(value) is int for value in output_domain)
-            ):
-                operand = definition.operand
-                output_domain = tuple(
-                    value + operand
-                    if definition.operation is TransformOperation.ADD
-                    else value ^ operand
-                    for value in output_domain
-                    if type(value) is int
-                )
-            elif (
-                isinstance(definition, Transform)
-                and definition.operation is TransformOperation.LOOKUP
-            ):
-                lookup = {core._scalar_sort_key(key): value for key, value in definition.lookup}
-                missing = tuple(
-                    value for value in output_domain if core._scalar_sort_key(value) not in lookup
-                )
-                if missing:
+            if isinstance(definition, Transform):
+                requires_numeric_input = definition.operation in {
+                    TransformOperation.ADD,
+                    TransformOperation.XOR,
+                    TransformOperation.REVERSE,
+                    TransformOperation.LITTLE_ENDIAN,
+                    TransformOperation.BIG_ENDIAN,
+                }
+                if requires_numeric_input and not all(
+                    type(value) is int for value in output_domain
+                ):
                     diagnostics.append(
                         core.IRDiagnostic(
-                            "lookup_domain_incomplete",
+                            "invalid_transform_input_domain",
                             f"$.parser_fields.{field_id}.transforms[{index}]",
-                            f"lookup does not cover reachable parser values {missing!r}",
+                            f"{definition.operation.value} requires numeric input values",
                         )
                     )
-                else:
+                elif (
+                    definition.operation in {TransformOperation.ADD, TransformOperation.XOR}
+                    and type(definition.operand) is int
+                ):
+                    operand = definition.operand
                     output_domain = tuple(
-                        lookup[core._scalar_sort_key(value)] for value in output_domain
+                        value + operand
+                        if definition.operation is TransformOperation.ADD
+                        else value ^ operand
+                        for value in output_domain
+                        if type(value) is int
                     )
+                elif definition.operation is TransformOperation.LOOKUP:
+                    lookup = {core._scalar_sort_key(key): value for key, value in definition.lookup}
+                    missing = tuple(
+                        value
+                        for value in output_domain
+                        if core._scalar_sort_key(value) not in lookup
+                    )
+                    if missing:
+                        diagnostics.append(
+                            core.IRDiagnostic(
+                                "lookup_domain_incomplete",
+                                f"$.parser_fields.{field_id}.transforms[{index}]",
+                                f"lookup does not cover reachable parser values {missing!r}",
+                            )
+                        )
+                    else:
+                        output_domain = tuple(
+                            lookup[core._scalar_sort_key(value)] for value in output_domain
+                        )
         selector = collections["selectors"].get(field.target_selector)
         if isinstance(selector, SelectorDefinition):
             selector_values = {core._scalar_sort_key(value) for value in selector.values}
@@ -1696,10 +1858,21 @@ def _validate_final_references(document: FinalProtocolIRDocument) -> None:
                 )
     for parser_id, parser in document.notification_parsers:
         reference("bufferings", parser.buffering, f"$.notification_parsers.{parser_id}.buffering")
+        target_fields: dict[str, str] = {}
         for index, field in enumerate(parser.fields):
             reference("parser_fields", field, f"$.notification_parsers.{parser_id}.fields[{index}]")
             buffering = collections["bufferings"].get(parser.buffering)
             parsed_field = collections["parser_fields"].get(field)
+            if isinstance(parsed_field, ParserField):
+                previous = target_fields.setdefault(parsed_field.target_selector, field)
+                if previous != field:
+                    diagnostics.append(
+                        core.IRDiagnostic(
+                            "duplicate_parser_target",
+                            f"$.notification_parsers.{parser_id}.fields[{index}]",
+                            f"parser fields {previous!r} and {field!r} target the same selector",
+                        )
+                    )
             if (
                 isinstance(buffering, Buffering)
                 and buffering.mode is BufferingMode.FIXED_LENGTH
@@ -1742,9 +1915,15 @@ def _validate_final_references(document: FinalProtocolIRDocument) -> None:
         char = collections["gatt_characteristics"].get(transport.characteristic)
         lifecycle = collections["lifecycles"].get(transport.lifecycle)
         authentication = collections["authentications"].get(transport.authentication or "")
+        authentication_response_parser = (
+            authentication.response_parser if isinstance(authentication, Authentication) else None
+        )
+        requires_notifications = (
+            transport.notification_parser is not None or authentication_response_parser is not None
+        )
         if (
             isinstance(char, GattCharacteristic)
-            and transport.notification_parser is not None
+            and requires_notifications
             and not {GattCharacteristicRole.NOTIFY, GattCharacteristicRole.INDICATE}.intersection(
                 char.roles
             )
@@ -1752,12 +1931,12 @@ def _validate_final_references(document: FinalProtocolIRDocument) -> None:
             diagnostics.append(
                 core.IRDiagnostic(
                     "notification_role_missing",
-                    f"$.transports.{transport_id}.notification_parser",
+                    f"$.transports.{transport_id}",
                     "notification parsing requires a NOTIFY or INDICATE characteristic",
                 )
             )
         if (
-            transport.notification_parser is not None
+            requires_notifications
             and isinstance(lifecycle, Lifecycle)
             and LifecyclePhase.START_NOTIFY not in lifecycle.phases
         ):
@@ -1801,8 +1980,23 @@ def _validate_final_references(document: FinalProtocolIRDocument) -> None:
             if isinstance(transport, Transport)
             else None
         )
-        if isinstance(builder, PacketBuilder):
-            for field_id in builder.fields:
+        authentication = (
+            collections["authentications"].get(transport.authentication or "")
+            if isinstance(transport, Transport)
+            else None
+        )
+        request_builder = (
+            collections["packet_builders"].get(authentication.request_builder or "")
+            if isinstance(authentication, Authentication)
+            else None
+        )
+        mapping_builders = tuple(
+            candidate
+            for candidate in (builder, request_builder)
+            if isinstance(candidate, PacketBuilder)
+        )
+        for mapping_builder in mapping_builders:
+            for field_id in mapping_builder.fields:
                 field = collections["packet_fields"].get(field_id)
                 parameter = (
                     collections["action_parameters"].get(field.source_ref or "")
@@ -1830,7 +2024,6 @@ def _validate_final_references(document: FinalProtocolIRDocument) -> None:
                     and field.source is PacketFieldSource.SELECTOR
                     and field.source_ref is not None
                 )
-            authentication = collections["authentications"].get(transport.authentication or "")
             if isinstance(authentication, Authentication):
                 selector_refs.extend(authentication.selectors)
                 request_builder = collections["packet_builders"].get(

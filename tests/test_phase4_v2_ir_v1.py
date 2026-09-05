@@ -489,6 +489,75 @@ def test_gatt_uuid_rejects_invalid_endpoint(value: str) -> None:
         )
 
 
+def test_binary_discovery_matcher_requires_keyed_hex_bytes() -> None:
+    with pytest.raises(IRValidationError, match="requires its numeric manufacturer ID key"):
+        v1._parse_discovery_matcher(
+            {"field": "MANUFACTURER_DATA", "operation": "EQUALS", "value_hex": "0102"},
+            "$.matcher",
+        )
+    with pytest.raises(IRValidationError, match="invalid_hex"):
+        v1._parse_discovery_matcher(
+            {
+                "field": "SERVICE_DATA",
+                "operation": "EQUALS",
+                "key": "1234",
+                "value_hex": "raw bytes",
+            },
+            "$.matcher",
+        )
+
+    matcher = v1._parse_discovery_matcher(
+        {
+            "field": "SERVICE_DATA",
+            "operation": "PREFIX",
+            "key": "12345678-1234-ABCD-5678-123456789ABC",
+            "value_hex": "0102",
+        },
+        "$.matcher",
+    )
+    assert matcher.to_data() == {
+        "field": "SERVICE_DATA",
+        "operation": "PREFIX",
+        "key": "12345678-1234-abcd-5678-123456789abc",
+        "value_hex": "0102",
+    }
+
+    short_key = v1._parse_discovery_matcher(
+        {
+            "field": "SERVICE_DATA",
+            "operation": "EQUALS",
+            "key": "1234",
+            "value_hex": "01",
+        },
+        "$.matcher",
+    )
+    assert short_key.key == "00001234-0000-1000-8000-00805f9b34fb"
+    full_key = v1._parse_discovery_matcher(
+        {
+            "field": "SERVICE_DATA",
+            "operation": "EQUALS",
+            "key": "00001234-0000-1000-8000-00805f9b34fb",
+            "value_hex": "01",
+        },
+        "$.matcher",
+    )
+    assert v1._matchers_may_share_value(short_key, full_key)
+
+
+def test_discovery_regex_rejects_backtracking_grammar() -> None:
+    with pytest.raises(IRValidationError, match="unsafe_discovery_regex"):
+        v1._parse_discovery_matcher(
+            {"field": "DEVICE_NAME", "operation": "REGEX", "value": "(a+)+b"},
+            "$.matcher",
+        )
+
+    matcher = v1._parse_discovery_matcher(
+        {"field": "DEVICE_NAME", "operation": "REGEX", "value": "^Bed[0-9]$"},
+        "$.matcher",
+    )
+    assert matcher.value == "^Bed[0-9]$"
+
+
 @pytest.mark.parametrize("constant", ["ff", "ffffff"])
 def test_packet_constant_must_match_declared_width(constant: str) -> None:
     with pytest.raises(IRValidationError, match="invalid_packet_field_width"):
@@ -615,6 +684,25 @@ def test_packet_field_transforms_must_preserve_destination_width() -> None:
         _load(data)
 
 
+def test_multibyte_dynamic_packet_field_requires_explicit_byte_order() -> None:
+    data = _document()
+    parameters = data["action_parameters"]
+    fields = data["packet_fields"]
+    transforms = data["transforms"]
+    assert isinstance(parameters, dict) and isinstance(fields, dict)
+    assert isinstance(transforms, dict)
+    parameters["strength"]["values"] = [258]
+    fields["strength_field"]["width"] = 2
+
+    with pytest.raises(IRValidationError, match="packet_field_byte_order_missing"):
+        _load(data)
+
+    transforms["little"] = {"operation": "LITTLE_ENDIAN"}
+    fields["strength_field"]["transforms"] = ["little"]
+    fields["checksum_field"]["offset"] = 2
+    _load(data)
+
+
 def test_duplicate_discovery_domain_cannot_select_different_protocols() -> None:
     data = _document()
     protocols = data["protocols"]
@@ -653,6 +741,16 @@ def test_partially_overlapping_discovery_domains_cannot_select_different_protoco
     }
 
     with pytest.raises(IRValidationError, match="ambiguous_discovery_rule"):
+        _load(data)
+
+
+def test_discovery_selection_rule_must_match_a_valid_profile() -> None:
+    data = _document()
+    selections = data["selection_rules"]
+    assert isinstance(selections, dict)
+    selections["select"]["when"] = {"op": "never"}
+
+    with pytest.raises(IRValidationError, match="unreachable_discovery_selection"):
         _load(data)
 
 
@@ -768,6 +866,56 @@ def test_nontrivial_authentication_requires_lifecycle_phase() -> None:
         _load(data)
 
 
+def test_pin_requires_executable_exchange() -> None:
+    data = _document()
+    authentications = data["authentications"]
+    assert isinstance(authentications, dict)
+    authentications["none"] = {
+        "method": "PIN",
+        "selectors": ["remote_code"],
+    }
+
+    with pytest.raises(IRValidationError, match="invalid_authentication_shape"):
+        _load(data)
+
+
+def test_session_token_is_rejected_until_token_extraction_is_modeled() -> None:
+    data = _document()
+    authentications = data["authentications"]
+    assert isinstance(authentications, dict)
+    authentications["none"] = {
+        "method": "SESSION_TOKEN",
+        "selectors": ["remote_code"],
+        "request_builder": "builder",
+        "response_parser": "parser",
+    }
+
+    with pytest.raises(IRValidationError, match="unsupported_authentication_method"):
+        _load(data)
+
+
+def test_pin_request_builder_must_emit_authentication_value() -> None:
+    data = _document()
+    authentications = data["authentications"]
+    lifecycles = data["lifecycles"]
+    assert isinstance(authentications, dict) and isinstance(lifecycles, dict)
+    authentications["none"] = {
+        "method": "PIN",
+        "selectors": ["remote_code"],
+        "request_builder": "builder",
+    }
+    lifecycles["command"]["phases"] = [
+        "CONNECT",
+        "AUTHENTICATE",
+        "START_NOTIFY",
+        "WRITE",
+        "DISCONNECT",
+    ]
+
+    with pytest.raises(IRValidationError, match="authentication_exchange_missing_credential"):
+        _load(data)
+
+
 def test_action_mapping_rejects_packet_parameter_for_another_action() -> None:
     data = _document()
     parameters = data["action_parameters"]
@@ -807,6 +955,33 @@ def test_parser_lookup_must_cover_every_reachable_raw_value() -> None:
     transforms["state_lookup"]["lookup"] = [[0, "idle"]]
 
     with pytest.raises(IRValidationError, match="lookup_domain_incomplete"):
+        _load(data)
+
+
+def test_parser_rejects_numeric_transform_after_string_lookup() -> None:
+    data = _document()
+    fields = data["parser_fields"]
+    assert isinstance(fields, dict)
+    fields["state"]["transforms"] = ["state_lookup", "xor"]
+
+    with pytest.raises(IRValidationError, match="invalid_transform_input_domain"):
+        _load(data)
+
+
+def test_notification_parser_rejects_conflicting_targets() -> None:
+    data = _document()
+    fields = data["parser_fields"]
+    parsers = data["notification_parsers"]
+    assert isinstance(fields, dict) and isinstance(parsers, dict)
+    fields["other_state"] = {
+        "offset": 1,
+        "width": 1,
+        "target_selector": "user_state",
+        "transforms": ["state_lookup"],
+    }
+    parsers["parser"]["fields"] = ["state", "other_state"]
+
+    with pytest.raises(IRValidationError, match="duplicate_parser_target"):
         _load(data)
 
 
@@ -860,6 +1035,91 @@ def test_notification_parser_requires_start_notify_lifecycle_phase() -> None:
     lifecycles["command"]["phases"] = ["CONNECT", "WRITE", "DISCONNECT"]
 
     with pytest.raises(IRValidationError, match="notification_lifecycle_missing_start"):
+        _load(data)
+
+
+@pytest.mark.parametrize(
+    ("roles", "phases", "code"),
+    [
+        (
+            ["WRITE"],
+            ["CONNECT", "AUTHENTICATE", "START_NOTIFY", "WRITE", "DISCONNECT"],
+            "notification_role_missing",
+        ),
+        (
+            ["NOTIFY", "WRITE"],
+            ["CONNECT", "AUTHENTICATE", "WRITE", "DISCONNECT"],
+            "notification_lifecycle_missing_start",
+        ),
+    ],
+)
+def test_authentication_response_parser_requires_notification_channel(
+    roles: list[str], phases: list[str], code: str
+) -> None:
+    data = _document()
+    authentications = data["authentications"]
+    transports = data["transports"]
+    characteristics = data["gatt_characteristics"]
+    lifecycles = data["lifecycles"]
+    assert isinstance(authentications, dict) and isinstance(transports, dict)
+    assert isinstance(characteristics, dict) and isinstance(lifecycles, dict)
+    authentications["none"] = {
+        "method": "CHALLENGE_RESPONSE",
+        "selectors": ["remote_code"],
+        "request_builder": "builder",
+        "response_parser": "parser",
+    }
+    transports["transport"].pop("notification_parser")
+    characteristics["write"]["roles"] = roles
+    lifecycles["command"]["phases"] = phases
+
+    with pytest.raises(IRValidationError, match=code):
+        _load(data)
+
+
+def test_authentication_builder_parameter_must_belong_to_mapped_action() -> None:
+    data = _document()
+    parameters = data["action_parameters"]
+    fields = data["packet_fields"]
+    builders = data["packet_builders"]
+    authentications = data["authentications"]
+    lifecycles = data["lifecycles"]
+    assert isinstance(parameters, dict) and isinstance(fields, dict)
+    assert isinstance(builders, dict) and isinstance(authentications, dict)
+    assert isinstance(lifecycles, dict)
+    parameters["stop_parameter"] = {"action": "stop", "values": [1]}
+    fields["auth_value"] = {
+        "offset": 0,
+        "width": 1,
+        "source": "AUTHENTICATION",
+        "source_ref": "none",
+        "transforms": [],
+    }
+    fields["wrong_parameter"] = {
+        "offset": 1,
+        "width": 1,
+        "source": "ACTION_PARAMETER",
+        "source_ref": "stop_parameter",
+        "transforms": [],
+    }
+    builders["auth_builder"] = {
+        "fields": ["auth_value", "wrong_parameter"],
+        "framing": "frame",
+    }
+    authentications["none"] = {
+        "method": "PIN",
+        "selectors": ["remote_code"],
+        "request_builder": "auth_builder",
+    }
+    lifecycles["command"]["phases"] = [
+        "CONNECT",
+        "AUTHENTICATE",
+        "START_NOTIFY",
+        "WRITE",
+        "DISCONNECT",
+    ]
+
+    with pytest.raises(IRValidationError, match="action_mapping_parameter_mismatch"):
         _load(data)
 
 
@@ -918,6 +1178,7 @@ def test_action_mapping_rejects_transport_selector_from_another_variant_space(
             "transforms": ["other_lookup"],
         }
         parsers["auth_parser"] = {"buffering": "datagram", "fields": ["auth_state"]}
+        auth["request_builder"] = "builder"
         auth["response_parser"] = "auth_parser"
     authentications["none"] = auth
 
