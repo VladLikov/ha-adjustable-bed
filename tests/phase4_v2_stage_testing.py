@@ -7,7 +7,13 @@ import json
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from tools.phase4_v2.orchestration import ActivatedStageAuthority
+from tools.phase4_v2.equivalence import FrozenPackageExecutionPlan
+from tools.phase4_v2.orchestration import (
+    CLUSTER_MEMBERSHIP_MANIFEST_REVISION,
+    ActivatedStageAuthority,
+    TrustedClusterMembershipManifest,
+    load_cluster_membership_manifest,
+)
 from tools.phase4_v2.queue import TrackerDocument, TrackerDocumentSet, document_set_sha256
 
 
@@ -58,6 +64,27 @@ def sign_stage(
     return canonical({"payload": payload, "signature": signature})
 
 
+def cluster_membership_manifest(
+    plans: tuple[FrozenPackageExecutionPlan, ...],
+    key: Ed25519PrivateKey,
+    authority: ActivatedStageAuthority,
+) -> TrustedClusterMembershipManifest:
+    cluster_ids = {plan.cluster_id for plan in plans}
+    if len(cluster_ids) != 1:
+        raise ValueError("synthetic membership plans must belong to one cluster")
+    canonical_bytes = sign_stage(
+        "reconciliation",
+        {
+            "cluster_id": next(iter(cluster_ids)),
+            "package_ref_ids": sorted(plan.target_package_ref_id for plan in plans),
+            "revision": CLUSTER_MEMBERSHIP_MANIFEST_REVISION,
+        },
+        key,
+        authority,
+    )
+    return load_cluster_membership_manifest(canonical_bytes, authority)
+
+
 def canonical(value: object) -> bytes:
     return json.dumps(
         value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
@@ -66,5 +93,3 @@ def canonical(value: object) -> bytes:
 
 def digest(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
-
-

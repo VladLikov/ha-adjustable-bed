@@ -46,6 +46,7 @@ from .graph import (
 )
 
 STAGE_AUTHORITY_REVISION = "phase4-v2-stage-authority-v1"
+CLUSTER_MEMBERSHIP_MANIFEST_REVISION = "phase4-v2-cluster-membership-manifest-v1"
 
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
 _SIGNATURE = re.compile(r"^[0-9a-f]{128}$")
@@ -69,6 +70,21 @@ class ActivatedStageAuthority:
 
     def __init__(self) -> None:
         raise ValueError("stage authorities must be loaded from a pinned activation")
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class TrustedClusterMembershipManifest:
+    """Reconciliation-authorized complete package membership for one cluster."""
+
+    revision: str
+    authority_sha256: str
+    cluster_id: str
+    package_ref_ids: tuple[str, ...]
+    canonical_bytes: bytes
+    manifest_sha256: str
+
+    def __init__(self) -> None:
+        raise ValueError("cluster membership manifests must be loaded from signed bytes")
 
 
 def load_stage_authority(canonical_bytes: bytes) -> ActivatedStageAuthority:
@@ -219,6 +235,62 @@ class AuthenticatedReconciliationInput:
 
     def __init__(self) -> None:
         raise ValueError("authenticated reconciliation inputs require the trusted factory")
+
+
+def load_cluster_membership_manifest(
+    canonical_bytes: bytes, authority: ActivatedStageAuthority
+) -> TrustedClusterMembershipManifest:
+    payload, manifest_sha256 = _load_signed(canonical_bytes, authority, "reconciliation")
+    _keys(
+        payload,
+        {
+            "authority_sha256",
+            "cluster_id",
+            "package_ref_ids",
+            "revision",
+            "stage",
+        },
+        "cluster membership manifest",
+    )
+    if payload["revision"] != CLUSTER_MEMBERSHIP_MANIFEST_REVISION:
+        raise QueueConflictError("cluster membership manifest revision is unsupported")
+    raw_package_ref_ids = payload["package_ref_ids"]
+    if (
+        type(raw_package_ref_ids) is not list
+        or not raw_package_ref_ids
+        or len(raw_package_ref_ids) > _MAX_PACKAGES
+    ):
+        raise ValueError("cluster membership must be a non-empty bounded JSON array")
+    package_ref_ids = tuple(
+        _digest(item, "cluster membership package") for item in raw_package_ref_ids
+    )
+    if package_ref_ids != tuple(sorted(set(package_ref_ids))):
+        raise ValueError("cluster membership packages must be sorted and unique")
+    result = object.__new__(TrustedClusterMembershipManifest)
+    for field, value in (
+        ("revision", CLUSTER_MEMBERSHIP_MANIFEST_REVISION),
+        ("authority_sha256", _digest(payload["authority_sha256"], "manifest authority")),
+        ("cluster_id", _token(payload["cluster_id"], "manifest cluster")),
+        ("package_ref_ids", package_ref_ids),
+        ("canonical_bytes", canonical_bytes),
+        ("manifest_sha256", manifest_sha256),
+    ):
+        object.__setattr__(result, field, value)
+    return result
+
+
+def validate_cluster_membership_manifest(
+    manifest: TrustedClusterMembershipManifest,
+    authority: ActivatedStageAuthority,
+) -> TrustedClusterMembershipManifest:
+    if type(manifest) is not TrustedClusterMembershipManifest:
+        raise QueueConflictError("cluster graph requires an exact membership manifest")
+    restored = load_cluster_membership_manifest(manifest.canonical_bytes, authority)
+    if restored != manifest:
+        raise QueueConflictError(
+            "cluster membership fields do not match their signed canonical preimage"
+        )
+    return restored
 
 
 def load_package_audit_receipt(

@@ -96,7 +96,7 @@ def _document() -> dict[str, object]:
             "checksum": {
                 "algorithm": "SUM8",
                 "start_byte": 0,
-                "end_byte": 2,
+                "end_byte": 1,
                 "output_width": 1,
             }
         },
@@ -177,12 +177,48 @@ def _document() -> dict[str, object]:
 
 def _add_stop_mapping(data: dict[str, object], protocol: str) -> None:
     for collection, key, value in (
-        ("expected_action_rules", "expect_stop", {"protocol": protocol, "action": "stop", "when": {"op": "always"}}),
-        ("timings", "stop_timing", {"repeat_count": 1, "repeat_interval_ms": 0, "cancellation": "AFTER_FRAME", "release": "NONE"}),
-        ("packet_fields", "stop_field", {"offset": 0, "width": 1, "source": "CONSTANT", "constant_hex": "00", "transforms": []}),
+        (
+            "expected_action_rules",
+            "expect_stop",
+            {"protocol": protocol, "action": "stop", "when": {"op": "always"}},
+        ),
+        (
+            "timings",
+            "stop_timing",
+            {
+                "repeat_count": 1,
+                "repeat_interval_ms": 0,
+                "cancellation": "AFTER_FRAME",
+                "release": "NONE",
+            },
+        ),
+        (
+            "packet_fields",
+            "stop_field",
+            {"offset": 0, "width": 1, "source": "CONSTANT", "constant_hex": "00", "transforms": []},
+        ),
         ("packet_builders", "stop_builder", {"fields": ["stop_field"], "framing": "frame"}),
-        ("transports", "stop_transport", {"characteristic": "write", "write_mode": "WITHOUT_RESPONSE", "packet_builder": "stop_builder", "timing": "stop_timing", "lifecycle": "command"}),
-        ("action_mappings", "stop_mapping", {"protocol": protocol, "action": "stop", "transport": "stop_transport", "when": {"op": "always"}}),
+        (
+            "transports",
+            "stop_transport",
+            {
+                "characteristic": "write",
+                "write_mode": "WITHOUT_RESPONSE",
+                "packet_builder": "stop_builder",
+                "timing": "stop_timing",
+                "lifecycle": "command",
+            },
+        ),
+        (
+            "action_mappings",
+            "stop_mapping",
+            {
+                "protocol": protocol,
+                "action": "stop",
+                "transport": "stop_transport",
+                "when": {"op": "always"},
+            },
+        ),
     ):
         target = data[collection]
         assert isinstance(target, dict)
@@ -446,8 +482,13 @@ def test_gatt_uuid_rejects_invalid_endpoint(value: str) -> None:
 def test_packet_constant_must_match_declared_width(constant: str) -> None:
     with pytest.raises(IRValidationError, match="invalid_packet_field_width"):
         v1._parse_packet_field(
-            {"offset": 0, "width": 2, "source": "CONSTANT", "constant_hex": constant,
-             "transforms": []},
+            {
+                "offset": 0,
+                "width": 2,
+                "source": "CONSTANT",
+                "constant_hex": constant,
+                "transforms": [],
+            },
             "$.field",
         )
 
@@ -500,6 +541,38 @@ def test_arithmetic_transform_operand_must_fit_each_target_field() -> None:
         _load(data)
 
 
+def test_packet_lookup_must_cover_every_source_domain_value() -> None:
+    data = _document()
+    transforms = data["transforms"]
+    fields = data["packet_fields"]
+    assert isinstance(transforms, dict)
+    assert isinstance(fields, dict)
+    transforms["strength_lookup"] = {"operation": "LOOKUP", "lookup": [[1, 10]]}
+    fields["strength_field"]["transforms"] = ["strength_lookup"]
+
+    with pytest.raises(IRValidationError, match="lookup_domain_incomplete"):
+        _load(data)
+
+    transforms["strength_lookup"]["lookup"].append([2, 20])
+    _load(data)
+
+
+def test_packet_lookup_uses_domain_after_arithmetic_transforms() -> None:
+    data = _document()
+    parameters = data["action_parameters"]
+    transforms = data["transforms"]
+    fields = data["packet_fields"]
+    assert isinstance(parameters, dict)
+    assert isinstance(transforms, dict)
+    assert isinstance(fields, dict)
+    parameters["strength"]["values"] = [1]
+    transforms["add"] = {"operation": "ADD", "operand": 1}
+    transforms["strength_lookup"] = {"operation": "LOOKUP", "lookup": [[2, 10]]}
+    fields["strength_field"]["transforms"] = ["add", "strength_lookup"]
+
+    _load(data)
+
+
 def test_duplicate_discovery_domain_cannot_select_different_protocols() -> None:
     data = _document()
     protocols = data["protocols"]
@@ -513,6 +586,28 @@ def test_duplicate_discovery_domain_cannot_select_different_protocols() -> None:
     discoveries["discover_other"] = {
         "selection_rule": "select_other",
         "matchers": copy.deepcopy(discoveries["discover"]["matchers"]),
+    }
+
+    with pytest.raises(IRValidationError, match="ambiguous_discovery_rule"):
+        _load(data)
+
+
+def test_partially_overlapping_discovery_domains_cannot_select_different_protocols() -> None:
+    data = _document()
+    protocols = data["protocols"]
+    selections = data["selection_rules"]
+    discoveries = data["discovery_rules"]
+    assert isinstance(protocols, dict)
+    assert isinstance(selections, dict)
+    assert isinstance(discoveries, dict)
+    protocols["other"] = {"variant_space": "variants"}
+    selections["select_other"] = {"protocol": "other", "when": {"op": "always"}}
+    discoveries["discover_other"] = {
+        "selection_rule": "select_other",
+        "matchers": [
+            *copy.deepcopy(discoveries["discover"]["matchers"]),
+            {"field": "DEVICE_NAME", "operation": "PREFIX", "value": "Bed"},
+        ],
     }
 
     with pytest.raises(IRValidationError, match="ambiguous_discovery_rule"):
@@ -549,6 +644,16 @@ def test_packet_builder_checksum_range_must_be_emitted_by_builder() -> None:
     checksums["checksum"]["end_byte"] = 100
 
     with pytest.raises(IRValidationError, match="checksum_range_out_of_bounds"):
+        _load(data)
+
+
+def test_packet_builder_checksum_range_must_exclude_output_field() -> None:
+    data = _document()
+    checksums = data["checksums"]
+    assert isinstance(checksums, dict)
+    checksums["checksum"]["end_byte"] = 2
+
+    with pytest.raises(IRValidationError, match="checksum_range_includes_output"):
         _load(data)
 
 
@@ -621,6 +726,14 @@ def test_fixed_length_parser_rejects_field_beyond_buffer() -> None:
         _load(data)
     fields["state"]["offset"] = 0
     _load(data)
+
+
+def test_length_prefixed_buffering_is_rejected_until_semantics_are_modeled() -> None:
+    data = _document()
+    data["bufferings"] = {"datagram": {"mode": "LENGTH_PREFIXED", "size": 1}}
+
+    with pytest.raises(IRValidationError, match="unsupported_buffering_mode"):
+        _load(data)
 
 
 @pytest.mark.parametrize("mutation", ["missing", "other_protocol", "profile", "parameters"])

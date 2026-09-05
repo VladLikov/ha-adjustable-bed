@@ -23,6 +23,7 @@ from tests.phase4_v2_orchestration_testing import (
     build_synthetic_package_inputs,
     protected_fixture_trust,
 )
+from tests.phase4_v2_stage_testing import cluster_membership_manifest
 from tools.phase4_v2.equivalence import preparation_capability_pins
 from tools.phase4_v2.orchestration import (
     STAGE_AUTHORITY_REVISION,
@@ -154,6 +155,9 @@ def _materialize_real_graph(
             reconciliation_authority=authorities["reconciliation"],
             implementation_authority=authorities["implementation"],
             publication_authority=authorities["publication"],
+            cluster_membership=cluster_membership_manifest(
+                (plan,), _AUTHORITY_KEYS["reconciliation"], authorities["reconciliation"]
+            ),
         )
     _STAGE_GRAPHS[cluster] = graph
     materialize_cluster_graph(queue, graph)

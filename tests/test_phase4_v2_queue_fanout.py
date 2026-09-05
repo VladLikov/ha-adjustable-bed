@@ -60,6 +60,7 @@ class _MemorySetGateway:
         self.corrupt_readback = False
         self.reads = 0
         self.writes = 0
+        self.protection_checks = 0
 
     def read(self, paths: tuple[str, ...]) -> TrackerDocumentSet:
         self.reads += 1
@@ -111,6 +112,11 @@ def _sealed_gateway(
         "compare_and_replace",
         lambda _self, **values: backend.compare_and_replace(**values),
     )
+    monkeypatch.setattr(
+        GitHubTreeGateway,
+        "verify_branch_protection",
+        lambda _self: setattr(backend, "protection_checks", backend.protection_checks + 1),
+    )
     return GitHubTreeGateway(backend.repository, backend.branch)
 
 
@@ -153,6 +159,21 @@ def test_fanout_publishes_markdown_and_html_from_one_snapshot(
         fanout_module._authenticate_tracker_fanout_receipt(queue, sealed, _CONFIG, receipt)
         == receipt
     )
+
+
+def test_fanout_checks_branch_protection_when_trackers_are_already_current(
+    publisher: tuple[Queue, Lease], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    queue, lease = publisher
+    backend = _MemorySetGateway()
+    sealed = _sealed_gateway(monkeypatch, backend)
+    first = publish_tracker_fanout(queue, lease, sealed, _CONFIG)
+    assert first.changed
+
+    receipt = publish_tracker_fanout(queue, lease, sealed, _CONFIG)
+
+    assert not receipt.changed
+    assert backend.protection_checks == 1
 
 
 def test_fanout_rejects_non_publication_lease_before_gateway_access(

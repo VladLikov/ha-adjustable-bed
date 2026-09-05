@@ -157,6 +157,7 @@ def publish_tracker_fanout(
         desired_digest = document_set_sha256(desired)
         _require_current(queue, lease, snapshot.generation_id, post_write=False)
         if before.documents == desired:
+            gateway.verify_branch_protection()
             grant = object.__new__(_TrackerPublicationCheckpointGrant)
             for name, value in (
                 ("lease_id", lease.lease_id),

@@ -37,6 +37,7 @@ from tests.phase4_v2_stage_testing import (
 from tests.phase4_v2_stage_testing import (
     canonical as _canonical,
 )
+from tests.phase4_v2_stage_testing import cluster_membership_manifest
 from tests.phase4_v2_stage_testing import (
     digest as _digest,
 )
@@ -246,7 +247,6 @@ class AuthenticatedSyntheticPackage:
     exact_reuse_receipts: tuple[AuthenticatedExactReuseProvenance, ...]
 
 
-
 def run_synthetic_acceptance(
     root: Path, config: SyntheticAcceptanceConfig
 ) -> SyntheticAcceptanceReport:
@@ -306,7 +306,9 @@ def _run_synthetic_acceptance(
     attempts_root = root / "attempts"
     queue = Queue(database, attempts_root)
     queue.initialize()
-    states = _build_graphs(queue, config, authorities, trust, root / "fixtures", cluster_index=0)
+    states = _build_graphs(
+        queue, config, keys, authorities, trust, root / "fixtures", cluster_index=0
+    )
     for state in states.values():
         materialize_cluster_graph(queue, state.graph)
 
@@ -322,7 +324,13 @@ def _run_synthetic_acceptance(
                 break
             states.update(
                 _build_graphs(
-                    queue, config, authorities, trust, root / "fixtures", cluster_index=len(states)
+                    queue,
+                    config,
+                    keys,
+                    authorities,
+                    trust,
+                    root / "fixtures",
+                    cluster_index=len(states),
                 )
             )
             continue
@@ -624,6 +632,7 @@ def _finish_stage(
 def _build_graphs(
     queue: Queue,
     config: SyntheticAcceptanceConfig,
+    keys: dict[str, Ed25519PrivateKey],
     authorities: dict[str, ActivatedStageAuthority],
     trust: SyntheticTrust,
     fixtures_root: Path,
@@ -663,6 +672,11 @@ def _build_graphs(
         reconciliation_authority=authorities["reconciliation"],
         implementation_authority=authorities["implementation"],
         publication_authority=authorities["publication"],
+        cluster_membership=cluster_membership_manifest(
+            tuple(item.frozen_plan for item in completed_packages),
+            keys["reconciliation"],
+            authorities["reconciliation"],
+        ),
     )
     result[cluster] = _ClusterState(
         graph,
@@ -1100,7 +1114,6 @@ def _protected_stage_authorities() -> Iterator[
         for stage in _STAGE_NAMES:
             authorities[stage] = load_stage_authority(documents[stage])
         yield keys, authorities
-
 
 
 _STAGE_NAMES = ("audit", "reconciliation", "implementation", "publication")

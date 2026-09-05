@@ -1,10 +1,12 @@
 """Safe orchestration primitives for independent Phase 4 v2 workers."""
 
 from .completion import (
+    CLUSTER_MEMBERSHIP_MANIFEST_REVISION,
     STAGE_AUTHORITY_REVISION,
     ActivatedStageAuthority,
     AuthenticatedReconciliationInput,
     StageCompletion,
+    TrustedClusterMembershipManifest,
     TrustedImplementationReceipt,
     TrustedPackageAuditReceipt,
     TrustedPublicationReceipt,
@@ -14,6 +16,7 @@ from .completion import (
     finish_cluster_reconciliation,
     finish_package_audit,
     finish_tracker_publication,
+    load_cluster_membership_manifest,
     load_implementation_receipt,
     load_package_audit_receipt,
     load_publication_receipt,
@@ -21,6 +24,7 @@ from .completion import (
     load_stage_authority,
     stage_authority_capability,
     validate_authenticated_reconciliation_input,
+    validate_cluster_membership_manifest,
 )
 from .graph import (
     CLUSTER_GRAPH_REVISION,
@@ -55,6 +59,7 @@ __all__ = [
     "ContextExit",
     "ActivatedStageAuthority",
     "AuthenticatedReconciliationInput",
+    "CLUSTER_MEMBERSHIP_MANIFEST_REVISION",
     "CLUSTER_GRAPH_REVISION",
     "CLUSTER_IMPLEMENTATION_COMPLETION_REVISION",
     "CLUSTER_RECONCILIATION_COMPLETION_REVISION",
@@ -73,6 +78,7 @@ __all__ = [
     "STAGE_AUTHORITY_REVISION",
     "TRACKER_PUBLICATION_COMPLETION_REVISION",
     "TrustedImplementationReceipt",
+    "TrustedClusterMembershipManifest",
     "TrustedPackageAuditReceipt",
     "TrustedPublicationReceipt",
     "TrustedReconciliationReceipt",
@@ -88,6 +94,7 @@ __all__ = [
     "launch_one",
     "materialize_cluster_graph",
     "load_implementation_receipt",
+    "load_cluster_membership_manifest",
     "load_package_audit_receipt",
     "load_publication_receipt",
     "load_reconciliation_receipt",
@@ -99,4 +106,5 @@ __all__ = [
     "tracker_publication_unit_id",
     "validate_cluster_graph",
     "validate_authenticated_reconciliation_input",
+    "validate_cluster_membership_manifest",
 ]

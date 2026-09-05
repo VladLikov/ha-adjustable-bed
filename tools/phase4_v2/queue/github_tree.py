@@ -123,7 +123,7 @@ class GitHubTreeGateway:
             or document_set_sha256(current.documents) != expected_documents_sha256
         ):
             return False
-        self._require_protected_branch()
+        self.verify_branch_protection()
 
         commit = self._get(
             f"repos/{self._repository}/git/commits/{expected_revision}",
@@ -195,6 +195,11 @@ class GitHubTreeGateway:
         ):
             raise GitHubContentsError("GitHub returned an invalid tracker ref receipt")
         return True
+
+    def verify_branch_protection(self) -> None:
+        """Require the configured branch to forbid force pushes and deletion."""
+
+        self._require_protected_branch()
 
     def _require_protected_branch(self) -> None:
         response = self._get(

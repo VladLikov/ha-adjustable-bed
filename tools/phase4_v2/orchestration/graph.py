@@ -7,7 +7,7 @@ import json
 import re
 import sqlite3
 from dataclasses import dataclass, field
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 from tools.phase4_v2.equivalence.plan import (
     VALIDATED_PACKAGE_OUTPUT_REVISION,
@@ -30,6 +30,9 @@ from tools.phase4_v2.queue import (
     QueueSnapshot,
     WorkUnitStatus,
 )
+
+if TYPE_CHECKING:
+    from .completion import ActivatedStageAuthority, TrustedClusterMembershipManifest
 
 CLUSTER_GRAPH_REVISION = "phase4-v2-cluster-stage-graph-v1"
 PACKAGE_AUDIT_COMPLETION_REVISION = "phase4-v2-package-audit-receipt-v1"
@@ -101,11 +104,14 @@ class ClusterGraphPlan:
     """The complete immutable topology and capability pins for one cluster."""
 
     cluster_id: str
+    cluster_membership_sha256: str
     packages: tuple[PackageAnalysisUnit, ...]
     audit_capability_pins: tuple[CapabilityPin, ...]
     reconciliation_capability_pins: tuple[CapabilityPin, ...]
     implementation_capability_pins: tuple[CapabilityPin, ...]
     publication_capability_pins: tuple[CapabilityPin, ...]
+    _cluster_membership: TrustedClusterMembershipManifest = field(repr=False, compare=False)
+    _cluster_membership_authority: ActivatedStageAuthority = field(repr=False, compare=False)
     revision: str = CLUSTER_GRAPH_REVISION
     _content_id: str = field(init=False, repr=False, compare=False)
 
@@ -114,6 +120,7 @@ class ClusterGraphPlan:
 
     def _validate(self) -> None:
         _token(self.cluster_id, "cluster_id")
+        _digest(self.cluster_membership_sha256, "cluster membership")
         if self.revision != CLUSTER_GRAPH_REVISION:
             raise ValueError("cluster graph revision is unsupported")
         if (
@@ -138,6 +145,17 @@ class ClusterGraphPlan:
         content_id = _content_id("phase4-v2:cluster-stage-graph", self.to_data())
         if hasattr(self, "_content_id") and self._content_id != content_id:
             raise ValueError("cluster graph no longer matches its factory-built preimage")
+        from .completion import validate_cluster_membership_manifest
+
+        membership = validate_cluster_membership_manifest(
+            self._cluster_membership, self._cluster_membership_authority
+        )
+        if (
+            membership.cluster_id != self.cluster_id
+            or membership.manifest_sha256 != self.cluster_membership_sha256
+            or membership.package_ref_ids != tuple(item.package_ref_id for item in self.packages)
+        ):
+            raise ValueError("cluster graph does not match its authenticated membership")
         object.__setattr__(self, "_content_id", content_id)
 
     def to_data(self) -> dict[str, object]:
@@ -155,6 +173,7 @@ class ClusterGraphPlan:
                 ],
             },
             "cluster_id": self.cluster_id,
+            "cluster_membership_sha256": self.cluster_membership_sha256,
             "completion_revisions": {
                 "audit": PACKAGE_AUDIT_COMPLETION_REVISION,
                 "implementation": CLUSTER_IMPLEMENTATION_COMPLETION_REVISION,
@@ -179,6 +198,7 @@ def build_cluster_graph(
     reconciliation_authority: object,
     implementation_authority: object,
     publication_authority: object,
+    cluster_membership: TrustedClusterMembershipManifest,
     priorities: tuple[int, ...] | None = None,
 ) -> ClusterGraphPlan:
     """Build one graph only from canonical plans and currently activated pins."""
@@ -207,7 +227,11 @@ def build_cluster_graph(
         or any(type(item) is not int or not -(2**31) <= item < 2**31 for item in priorities)
     ):
         raise ValueError("cluster graph priorities must match the frozen plans")
-    from .completion import ActivatedStageAuthority, stage_authority_capability
+    from .completion import (
+        ActivatedStageAuthority,
+        stage_authority_capability,
+        validate_cluster_membership_manifest,
+    )
 
     authorities = (
         audit_authority,
@@ -225,6 +249,14 @@ def build_cluster_graph(
         "publication",
     ):
         raise ValueError("cluster graph authorities do not match their stages")
+    membership = validate_cluster_membership_manifest(cluster_membership, activated[1])
+    cluster_id = next(iter(cluster_ids))
+    if membership.cluster_id != cluster_id or membership.package_ref_ids != tuple(
+        sorted(item.target_package_ref_id for item in frozen)
+    ):
+        raise QueueConflictError(
+            "cluster graph plans do not exactly match authenticated cluster membership"
+        )
     stage_pins = tuple((stage_authority_capability(item),) for item in activated)
     for name, pins in zip(
         ("audit", "reconciliation", "implementation", "publication"),
@@ -265,7 +297,8 @@ def build_cluster_graph(
         unit._validate()
         packages.append(unit)
     graph = object.__new__(ClusterGraphPlan)
-    object.__setattr__(graph, "cluster_id", next(iter(cluster_ids)))
+    object.__setattr__(graph, "cluster_id", cluster_id)
+    object.__setattr__(graph, "cluster_membership_sha256", membership.manifest_sha256)
     object.__setattr__(
         graph, "packages", tuple(sorted(packages, key=lambda item: item.package_ref_id))
     )
@@ -273,6 +306,8 @@ def build_cluster_graph(
     object.__setattr__(graph, "reconciliation_capability_pins", stage_pins[1])
     object.__setattr__(graph, "implementation_capability_pins", stage_pins[2])
     object.__setattr__(graph, "publication_capability_pins", stage_pins[3])
+    object.__setattr__(graph, "_cluster_membership", membership)
+    object.__setattr__(graph, "_cluster_membership_authority", activated[1])
     object.__setattr__(graph, "revision", CLUSTER_GRAPH_REVISION)
     graph._validate()
     return graph

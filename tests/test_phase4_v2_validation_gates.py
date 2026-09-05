@@ -27,6 +27,7 @@ from tests.phase4_v2_orchestration_testing import (
     protected_exact_reuse_trust,
     protected_fixture_trust,
 )
+from tests.phase4_v2_stage_testing import cluster_membership_manifest
 from tests.test_phase4_v2_ir import _authorized_single_leaf_document, _trusted_receipts
 from tools.phase4_v2.equivalence import (
     FINAL_IR_SCHEMA_SHA256,
@@ -264,6 +265,11 @@ def _build_audited_input(
         reconciliation_authority=authorities["reconciliation"],
         implementation_authority=authorities["implementation"],
         publication_authority=authorities["publication"],
+        cluster_membership=cluster_membership_manifest(
+            tuple(item.authenticated.frozen_plan for item in packages),
+            keys["reconciliation"],
+            authorities["reconciliation"],
+        ),
     )
     materialize_cluster_graph(queue, graph)
     surfaces_by_package = {item.package_ref.content_id: item for item in surfaces}
@@ -451,9 +457,7 @@ def test_genuine_authenticated_reuse_route_sets_are_accepted(
         assert receipt.accepted
         assert receipt.action_count == 2
         assert receipt.variant_count == 1
-        assert {
-            root.route.value for root in route_case.target.surface.roots
-        } == expected_routes
+        assert {root.route.value for root in route_case.target.surface.roots} == expected_routes
         assert len(route_case.target.authenticated.exact_reuse_receipts) == 1
 
 

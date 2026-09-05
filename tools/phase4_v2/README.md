@@ -31,9 +31,10 @@ is content-addressed and pins the exact upstream revisions and digests it consum
   can finish only from receipts that the queue reauthenticates against the unit's exact active
   authority capability. Publication completion is bound to the exact target paths, formats,
   configuration, document set, queue generation, and remote readback.
-- `orchestration/` derives one immutable cluster graph from accepted package plans and protected
-  stage authorities. It enforces package audit, whole-cluster reconciliation, implementation, and
-  tracker publication in order with signed, graph-bound receipts.
+- `orchestration/` derives one immutable cluster graph from accepted package plans, a signed complete
+  cluster-membership manifest, and protected stage authorities. It enforces package audit,
+  whole-cluster reconciliation, implementation, and tracker publication in order with signed,
+  graph-bound receipts.
 - `benchmark/` keeps real holdout findings outside the blinded plan and authorizes rollout only when
   all quality, mutation, audit, throughput, and token gates pass. Its root-owned authority commits
   the exact plan contract, oracle, ordered trial schedule, and one-to-one corpus membership, and is

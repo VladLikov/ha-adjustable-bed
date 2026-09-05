@@ -34,6 +34,8 @@ parent directories, or executable code. Expose specific validated operations, ne
 Python evaluation, shell execution, signing, or caller-supplied completion snapshots. The trusted
 process must reconstruct completion facts itself. Neither private Python classes nor a
 caller-selected SQLite file provides this separation.
+It must also derive and sign each complete cluster-membership manifest from the protected work
+queue, never from a caller-selected package tuple.
 
 For this deployment mode, the adapter and trusted service are outstanding implementation work.
 They are not prerequisites for preparing the T3-managed benchmark. Do not install a nominal

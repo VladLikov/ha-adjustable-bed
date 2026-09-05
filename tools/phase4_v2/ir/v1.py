@@ -761,7 +761,9 @@ def validate_final_universe(document: FinalProtocolIRDocument) -> FinalUniverseV
     mappings = dict(document.action_mappings)
     transports = dict(document.transports)
     timings = dict(document.timings)
-    cleanup_targets: dict[tuple[str, str, tuple[tuple[str, core.JsonScalar], ...]], list[FinalUniverseKey]] = {}
+    cleanup_targets: dict[
+        tuple[str, str, tuple[tuple[str, core.JsonScalar], ...]], list[FinalUniverseKey]
+    ] = {}
     for key in actual:
         cleanup_targets.setdefault((key.protocol, key.action, key.selectors), []).append(key)
     issues = [FinalUniverseIssue("missing_action_mapping", key, ()) for key in expected - actual]
@@ -912,13 +914,61 @@ def _parse_discovery_matcher(raw: object, path: str) -> DiscoveryMatcher:
     )
 
 
+def _discovery_domains_may_overlap(
+    left: tuple[DiscoveryMatcher, ...], right: tuple[DiscoveryMatcher, ...]
+) -> bool:
+    """Return false only when two conjunctions are provably disjoint."""
+
+    for left_matcher in left:
+        for right_matcher in right:
+            if left_matcher.field is right_matcher.field and not _matchers_may_share_value(
+                left_matcher, right_matcher
+            ):
+                return False
+    return True
+
+
+def _matchers_may_share_value(left: DiscoveryMatcher, right: DiscoveryMatcher) -> bool:
+    if MatchOperation.PRESENT in {left.operation, right.operation}:
+        return True
+    if left.operation is MatchOperation.EQUALS and right.operation is MatchOperation.EQUALS:
+        return left.value == right.value
+    if left.operation is MatchOperation.EQUALS and right.operation is MatchOperation.PREFIX:
+        return (
+            left.value is not None
+            and right.value is not None
+            and left.value.startswith(right.value)
+        )
+    if left.operation is MatchOperation.PREFIX and right.operation is MatchOperation.EQUALS:
+        return _matchers_may_share_value(right, left)
+    if left.operation is MatchOperation.PREFIX and right.operation is MatchOperation.PREFIX:
+        return (
+            left.value is not None
+            and right.value is not None
+            and (left.value.startswith(right.value) or right.value.startswith(left.value))
+        )
+    if left.operation is MatchOperation.EQUALS and right.operation is MatchOperation.REGEX:
+        return (
+            left.value is not None
+            and right.value is not None
+            and re.fullmatch(right.value, left.value) is not None
+        )
+    if left.operation is MatchOperation.REGEX and right.operation is MatchOperation.EQUALS:
+        return _matchers_may_share_value(right, left)
+    # Regex/prefix and regex/regex intersection is not generally decidable. Fail closed.
+    return True
+
+
 def _gatt_uuid(raw: object, path: str) -> str:
     value = core._expect_nonempty_string(raw, path, max_length=36)
-    if re.fullmatch(
-        r"(?:[0-9a-fA-F]{4}|[0-9a-fA-F]{8}|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-"
-        r"[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})",
-        value,
-    ) is None:
+    if (
+        re.fullmatch(
+            r"(?:[0-9a-fA-F]{4}|[0-9a-fA-F]{8}|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-"
+            r"[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})",
+            value,
+        )
+        is None
+    ):
         core._fail("invalid_gatt_uuid", path, "expected a 16, 32, or canonical 128-bit UUID")
     return value.lower()
 
@@ -962,8 +1012,7 @@ def _parse_transform(raw: object, path: str) -> Transform:
     operation = _enum(TransformOperation, value["operation"], f"{path}.operation")
     operand = (
         core._expect_integer(value["operand"], f"{path}.operand", minimum=0)
-        if "operand" in value
-        and operation in {TransformOperation.ADD, TransformOperation.XOR}
+        if "operand" in value and operation in {TransformOperation.ADD, TransformOperation.XOR}
         else core._expect_scalar(value["operand"], f"{path}.operand")
         if "operand" in value
         else None
@@ -1000,9 +1049,7 @@ def _parse_checksum(raw: object, path: str) -> Checksum:
     value = _object(raw, path, {"algorithm", "start_byte", "end_byte", "output_width"})
     start = core._expect_integer(value["start_byte"], f"{path}.start_byte", minimum=0)
     algorithm = _enum(ChecksumAlgorithm, value["algorithm"], f"{path}.algorithm")
-    output_width = core._expect_integer(
-        value["output_width"], f"{path}.output_width", minimum=1
-    )
+    output_width = core._expect_integer(value["output_width"], f"{path}.output_width", minimum=1)
     if output_width != 1:
         core._fail(
             "invalid_checksum_width",
@@ -1095,9 +1142,7 @@ def _parse_authentication(raw: object, path: str) -> Authentication:
         core._fail(
             "invalid_authentication_shape", path, "NONE authentication cannot declare inputs"
         )
-    if method is AuthenticationMethod.CHALLENGE_RESPONSE and (
-        request is None or response is None
-    ):
+    if method is AuthenticationMethod.CHALLENGE_RESPONSE and (request is None or response is None):
         core._fail(
             "invalid_authentication_shape",
             path,
@@ -1109,6 +1154,12 @@ def _parse_authentication(raw: object, path: str) -> Authentication:
 def _parse_buffering(raw: object, path: str) -> Buffering:
     value = _object(raw, path, {"mode"}, {"size", "delimiter_hex"})
     mode = _enum(BufferingMode, value["mode"], f"{path}.mode")
+    if mode is BufferingMode.LENGTH_PREFIXED:
+        core._fail(
+            "unsupported_buffering_mode",
+            f"{path}.mode",
+            "length-prefixed buffering is rejected until its prefix semantics are modeled",
+        )
     size = (
         core._expect_integer(value["size"], f"{path}.size", minimum=1) if "size" in value else None
     )
@@ -1332,35 +1383,25 @@ def _validate_final_references(document: FinalProtocolIRDocument) -> None:
         reference(
             "selection_rules", rule.selection_rule, f"$.discovery_rules.{rule_id}.selection_rule"
         )
-    discovery_domains: dict[
-        tuple[tuple[MatchField, MatchOperation, str | None], ...], tuple[str, str]
-    ] = {}
+    discovery_domains: list[tuple[str, str, tuple[DiscoveryMatcher, ...]]] = []
     selection_rules = cast(dict[str, SelectionRule], collections["selection_rules"])
     for rule_id, rule in document.discovery_rules:
         selection = selection_rules.get(rule.selection_rule)
         if selection is None:
             continue
-        matcher_set = tuple(
-            sorted(
-                {
-                    (matcher.field, matcher.operation, matcher.value)
-                    for matcher in rule.matchers
-                },
-                key=lambda item: (item[0].value, item[1].value, item[2] or ""),
-            )
-        )
-        previous = discovery_domains.get(matcher_set)
-        if previous is not None and previous[1] != selection.protocol:
-            diagnostics.append(
-                core.IRDiagnostic(
-                    "ambiguous_discovery_rule",
-                    f"$.discovery_rules.{rule_id}",
-                    f"matcher set also selects protocol {previous[1]!r} via discovery rule "
-                    f"{previous[0]!r}",
+        for previous_id, previous_protocol, previous_matchers in discovery_domains:
+            if previous_protocol != selection.protocol and _discovery_domains_may_overlap(
+                previous_matchers, rule.matchers
+            ):
+                diagnostics.append(
+                    core.IRDiagnostic(
+                        "ambiguous_discovery_rule",
+                        f"$.discovery_rules.{rule_id}",
+                        f"matcher domain can also select protocol {previous_protocol!r} via "
+                        f"discovery rule {previous_id!r}",
+                    )
                 )
-            )
-        else:
-            discovery_domains[matcher_set] = (rule_id, selection.protocol)
+        discovery_domains.append((rule_id, selection.protocol, rule.matchers))
     for char_id, char in document.gatt_characteristics:
         reference("gatt_services", char.service, f"$.gatt_characteristics.{char_id}.service")
         if char.write_modes and GattCharacteristicRole.WRITE not in char.roles:
@@ -1372,6 +1413,15 @@ def _validate_final_references(document: FinalProtocolIRDocument) -> None:
                 )
             )
     for field_id, field in document.packet_fields:
+        source_domain: tuple[core.JsonScalar, ...] | None = None
+        if field.source is PacketFieldSource.ACTION_PARAMETER:
+            parameter = collections["action_parameters"].get(field.source_ref or "")
+            if isinstance(parameter, ActionParameter):
+                source_domain = parameter.values
+        elif field.source is PacketFieldSource.SELECTOR:
+            selector = collections["selectors"].get(field.source_ref or "")
+            if isinstance(selector, SelectorDefinition):
+                source_domain = selector.values
         for index, transform in enumerate(field.transforms):
             reference("transforms", transform, f"$.packet_fields.{field_id}.transforms[{index}]")
             definition = collections["transforms"].get(transform)
@@ -1388,6 +1438,42 @@ def _validate_final_references(document: FinalProtocolIRDocument) -> None:
                         "arithmetic transform operand does not fit the target field width",
                     )
                 )
+            if (
+                source_domain is not None
+                and isinstance(definition, Transform)
+                and definition.operation in {TransformOperation.ADD, TransformOperation.XOR}
+                and type(definition.operand) is int
+                and all(type(value) is int for value in source_domain)
+            ):
+                operand = definition.operand
+                source_domain = tuple(
+                    value + operand
+                    if definition.operation is TransformOperation.ADD
+                    else value ^ operand
+                    for value in source_domain
+                    if type(value) is int
+                )
+            if (
+                source_domain is not None
+                and isinstance(definition, Transform)
+                and definition.operation is TransformOperation.LOOKUP
+            ):
+                lookup = {core._scalar_sort_key(key): value for key, value in definition.lookup}
+                missing = tuple(
+                    value for value in source_domain if core._scalar_sort_key(value) not in lookup
+                )
+                if missing:
+                    diagnostics.append(
+                        core.IRDiagnostic(
+                            "lookup_domain_incomplete",
+                            f"$.packet_fields.{field_id}.transforms[{index}]",
+                            f"lookup does not cover reachable source values {missing!r}",
+                        )
+                    )
+                else:
+                    source_domain = tuple(
+                        lookup[core._scalar_sort_key(value)] for value in source_domain
+                    )
         if field.source is PacketFieldSource.ACTION_PARAMETER:
             reference(
                 "action_parameters", field.source_ref, f"$.packet_fields.{field_id}.source_ref"
@@ -1398,10 +1484,13 @@ def _validate_final_references(document: FinalProtocolIRDocument) -> None:
             reference("checksums", field.source_ref, f"$.packet_fields.{field_id}.source_ref")
             checksum = collections["checksums"].get(field.source_ref or "")
             if isinstance(checksum, Checksum) and field.width != checksum.output_width:
-                diagnostics.append(core.IRDiagnostic(
-                    "checksum_field_width_mismatch", f"$.packet_fields.{field_id}.width",
-                    "checksum field width must equal the referenced checksum output width",
-                ))
+                diagnostics.append(
+                    core.IRDiagnostic(
+                        "checksum_field_width_mismatch",
+                        f"$.packet_fields.{field_id}.width",
+                        "checksum field width must equal the referenced checksum output width",
+                    )
+                )
         if field.source is PacketFieldSource.AUTHENTICATION:
             reference("authentications", field.source_ref, f"$.packet_fields.{field_id}.source_ref")
     for framing_id, framing in document.framings:
@@ -1430,8 +1519,7 @@ def _validate_final_references(document: FinalProtocolIRDocument) -> None:
                 )
             )
         if builder.checksum is not None and not any(
-            field.source is PacketFieldSource.CHECKSUM
-            and field.source_ref == builder.checksum
+            field.source is PacketFieldSource.CHECKSUM and field.source_ref == builder.checksum
             for field in builder_fields
         ):
             diagnostics.append(
@@ -1457,10 +1545,13 @@ def _validate_final_references(document: FinalProtocolIRDocument) -> None:
                 )
         fields = sorted((field.offset, field.offset + field.width) for field in builder_fields)
         if any(right[0] < left[1] for left, right in zip(fields, fields[1:], strict=False)):
-            diagnostics.append(core.IRDiagnostic(
-                "overlapping_packet_fields", f"$.packet_builders.{builder_id}.fields",
-                "packet builder fields must occupy disjoint byte ranges",
-            ))
+            diagnostics.append(
+                core.IRDiagnostic(
+                    "overlapping_packet_fields",
+                    f"$.packet_builders.{builder_id}.fields",
+                    "packet builder fields must occupy disjoint byte ranges",
+                )
+            )
         checksum = collections["checksums"].get(builder.checksum or "")
         if isinstance(checksum, Checksum) and checksum.end_byte > max(
             (end for _start, end in fields), default=0
@@ -1472,6 +1563,21 @@ def _validate_final_references(document: FinalProtocolIRDocument) -> None:
                     "checksum range extends beyond the packet builder output",
                 )
             )
+        if isinstance(checksum, Checksum):
+            for field in builder_fields:
+                if (
+                    field.source is PacketFieldSource.CHECKSUM
+                    and field.source_ref == builder.checksum
+                    and checksum.start_byte < field.offset + field.width
+                    and field.offset < checksum.end_byte
+                ):
+                    diagnostics.append(
+                        core.IRDiagnostic(
+                            "checksum_range_includes_output",
+                            f"$.packet_builders.{builder_id}.checksum",
+                            "checksum range must exclude its output field",
+                        )
+                    )
     for auth_id, auth in document.authentications:
         for index, selector in enumerate(auth.selectors):
             reference("selectors", selector, f"$.authentications.{auth_id}.selectors[{index}]")
@@ -1508,14 +1614,19 @@ def _validate_final_references(document: FinalProtocolIRDocument) -> None:
             buffering = collections["bufferings"].get(parser.buffering)
             parsed_field = collections["parser_fields"].get(field)
             if (
-                isinstance(buffering, Buffering) and buffering.mode is BufferingMode.FIXED_LENGTH
-                and buffering.size is not None and isinstance(parsed_field, ParserField)
+                isinstance(buffering, Buffering)
+                and buffering.mode is BufferingMode.FIXED_LENGTH
+                and buffering.size is not None
+                and isinstance(parsed_field, ParserField)
                 and parsed_field.offset + parsed_field.width > buffering.size
             ):
-                diagnostics.append(core.IRDiagnostic(
-                    "parser_field_out_of_bounds", f"$.notification_parsers.{parser_id}.fields[{index}]",
-                    "parser field extends beyond its fixed-length buffer",
-                ))
+                diagnostics.append(
+                    core.IRDiagnostic(
+                        "parser_field_out_of_bounds",
+                        f"$.notification_parsers.{parser_id}.fields[{index}]",
+                        "parser field extends beyond its fixed-length buffer",
+                    )
+                )
     for timing_id, timing in document.timings:
         reference("actions", timing.release_action, f"$.timings.{timing_id}.release_action")
     for transport_id, transport in document.transports:
@@ -1545,13 +1656,19 @@ def _validate_final_references(document: FinalProtocolIRDocument) -> None:
         lifecycle = collections["lifecycles"].get(transport.lifecycle)
         authentication = collections["authentications"].get(transport.authentication or "")
         if (
-            isinstance(char, GattCharacteristic) and transport.notification_parser is not None
-            and not {GattCharacteristicRole.NOTIFY, GattCharacteristicRole.INDICATE}.intersection(char.roles)
+            isinstance(char, GattCharacteristic)
+            and transport.notification_parser is not None
+            and not {GattCharacteristicRole.NOTIFY, GattCharacteristicRole.INDICATE}.intersection(
+                char.roles
+            )
         ):
-            diagnostics.append(core.IRDiagnostic(
-                "notification_role_missing", f"$.transports.{transport_id}.notification_parser",
-                "notification parsing requires a NOTIFY or INDICATE characteristic",
-            ))
+            diagnostics.append(
+                core.IRDiagnostic(
+                    "notification_role_missing",
+                    f"$.transports.{transport_id}.notification_parser",
+                    "notification parsing requires a NOTIFY or INDICATE characteristic",
+                )
+            )
         if (
             transport.notification_parser is not None
             and isinstance(lifecycle, Lifecycle)

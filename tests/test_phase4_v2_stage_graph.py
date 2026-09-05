@@ -28,6 +28,7 @@ from tests.phase4_v2_stage_testing import (
 from tests.phase4_v2_stage_testing import (
     canonical as _canonical,
 )
+from tests.phase4_v2_stage_testing import cluster_membership_manifest
 from tests.phase4_v2_stage_testing import (
     digest as _digest,
 )
@@ -132,13 +133,11 @@ def _protected_stage_config(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(stage_completion, "_load_stage_authority_config", load_config)
 
 
-
 @pytest.fixture
 def queue(tmp_path: Path) -> Queue:
     result = Queue(tmp_path / "state" / "queue.sqlite3", tmp_path / "attempts")
     result.initialize()
     return result
-
 
 
 def _pin(name: str) -> CapabilityPin:
@@ -252,9 +251,7 @@ def _frozen_plan(cluster: str, name: str) -> FrozenPackageExecutionPlan:
                 "reason": "synthetic",
                 "revision": "phase4-v2-root-execution-plan-v2",
                 "route": "FULL_ANALYSIS",
-                "target_occurrence_identity_sha256": _digest(
-                    f"occurrence:{cluster}:{name}"
-                ),
+                "target_occurrence_identity_sha256": _digest(f"occurrence:{cluster}:{name}"),
                 "target_root_id": _digest(f"root:{cluster}:{name}"),
             }
         ],
@@ -294,7 +291,9 @@ def _activate(queue: Queue, pins: tuple[CapabilityPin, ...]) -> None:
         queue.activate_capability_from_absent(pin.capability, pin.revision, pin.digest)
 
 
-def _graph(queue: Queue, cluster: str, names: tuple[str, ...], fixture_root: Path) -> ClusterGraphPlan:
+def _graph(
+    queue: Queue, cluster: str, names: tuple[str, ...], fixture_root: Path
+) -> ClusterGraphPlan:
     fixture_root.mkdir(parents=True, exist_ok=True)
     with protected_fixture_trust(fixture_root / "trust") as trust:
         active_capabilities: set[tuple[str, str, str]] = set()
@@ -326,6 +325,9 @@ def _graph(queue: Queue, cluster: str, names: tuple[str, ...], fixture_root: Pat
         reconciliation_authority=authorities["reconciliation"][1],
         implementation_authority=authorities["implementation"][1],
         publication_authority=authorities["publication"][1],
+        cluster_membership=cluster_membership_manifest(
+            plans, authorities["reconciliation"][0], authorities["reconciliation"][1]
+        ),
     )
 
 
@@ -346,7 +348,6 @@ def _authority(stage: str) -> tuple[Ed25519PrivateKey, ActivatedStageAuthority]:
     digest = hashlib.sha256(b"phase4-v2:stage-authority\0" + canonical).hexdigest()
     _PROTECTED_CONFIG[stage] = (digest, 1)
     return key, load_stage_authority(canonical)
-
 
 
 def _claim(queue: Queue, stage: WorkStage, owner: str) -> Lease:
@@ -518,9 +519,7 @@ def test_graph_and_authenticated_receipts_follow_real_stage_adapters(
             implementation_authority=implementation_authority,
             implementation_receipt=implementation,
             authority=publication_authority,
-            gateway=GitHubTreeGateway(
-                _PUBLICATION_CONFIG.repository, _PUBLICATION_CONFIG.branch
-            ),
+            gateway=GitHubTreeGateway(_PUBLICATION_CONFIG.repository, _PUBLICATION_CONFIG.branch),
             publication_config=_PUBLICATION_CONFIG,
             fanout_receipt=invented_fanout,
             receipt=invented_publication,
@@ -541,9 +540,7 @@ def test_graph_and_authenticated_receipts_follow_real_stage_adapters(
         "compare_and_replace",
         lambda _self, **values: gateway.compare_and_replace(**values),
     )
-    sealed_gateway = GitHubTreeGateway(
-        _PUBLICATION_CONFIG.repository, _PUBLICATION_CONFIG.branch
-    )
+    sealed_gateway = GitHubTreeGateway(_PUBLICATION_CONFIG.repository, _PUBLICATION_CONFIG.branch)
     forged_grant = object.__new__(_TrackerPublicationCheckpointGrant)
     for name, value in {
         "lease_id": publication_lease.lease_id,
@@ -572,9 +569,7 @@ def test_graph_and_authenticated_receipts_follow_real_stage_adapters(
             fanout_receipt=invented_fanout,
             receipt=invented_publication,
         )
-    fanout = publish_tracker_fanout(
-        queue, publication_lease, sealed_gateway, _PUBLICATION_CONFIG
-    )
+    fanout = publish_tracker_fanout(queue, publication_lease, sealed_gateway, _PUBLICATION_CONFIG)
     publication = load_publication_receipt(
         _signed(
             "publication",
@@ -622,17 +617,25 @@ def test_graph_and_authenticated_receipts_follow_real_stage_adapters(
     assert all(item.status is WorkUnitStatus.COMPLETED for item in queue.snapshot().units)
 
 
-def test_graph_constructors_and_inactive_capabilities_fail_closed(queue: Queue, tmp_path: Path) -> None:
+def test_graph_constructors_and_inactive_capabilities_fail_closed(
+    queue: Queue, tmp_path: Path
+) -> None:
     with pytest.raises(ValueError, match="frozen execution plans"):
         PackageAnalysisUnit()
     with pytest.raises(ValueError, match="frozen execution plans"):
         ClusterGraphPlan()
     plan = _frozen_plan("cluster", "alpha")
-    authorities = {
-        stage: _authority(stage)[1]
+    authority_pairs = {
+        stage: _authority(stage)
         for stage in ("audit", "reconciliation", "implementation", "publication")
     }
+    authorities = {stage: pair[1] for stage, pair in authority_pairs.items()}
     with pytest.raises(QueueConflictError, match="active queue head"):
+        membership = cluster_membership_manifest(
+            (plan,),
+            authority_pairs["reconciliation"][0],
+            authorities["reconciliation"],
+        )
         build_cluster_graph(
             queue,
             (plan,),
@@ -640,11 +643,35 @@ def test_graph_constructors_and_inactive_capabilities_fail_closed(queue: Queue, 
             reconciliation_authority=authorities["reconciliation"],
             implementation_authority=authorities["implementation"],
             publication_authority=authorities["publication"],
+            cluster_membership=membership,
         )
     graph = _graph(queue, "cluster-sealed", ("alpha",), tmp_path / "graph")
     object.__setattr__(graph, "cluster_id", "cluster-transplanted")
     with pytest.raises(ValueError, match="factory-built preimage"):
         materialize_cluster_graph(queue, graph)
+
+
+def test_graph_requires_every_authenticated_cluster_member(queue: Queue) -> None:
+    plans = (_frozen_plan("cluster-complete", "alpha"), _frozen_plan("cluster-complete", "beta"))
+    authority_pairs = {
+        stage: _authority(stage)
+        for stage in ("audit", "reconciliation", "implementation", "publication")
+    }
+    authorities = {stage: pair[1] for stage, pair in authority_pairs.items()}
+    membership = cluster_membership_manifest(
+        plans, authority_pairs["reconciliation"][0], authorities["reconciliation"]
+    )
+
+    with pytest.raises(QueueConflictError, match="authenticated cluster membership"):
+        build_cluster_graph(
+            queue,
+            plans[:1],
+            audit_authority=authorities["audit"],
+            reconciliation_authority=authorities["reconciliation"],
+            implementation_authority=authorities["implementation"],
+            publication_authority=authorities["publication"],
+            cluster_membership=membership,
+        )
 
 
 def test_authority_and_receipt_forgery_wrong_key_and_mutation_fail_closed() -> None:
@@ -677,8 +704,14 @@ def test_authority_and_receipt_forgery_wrong_key_and_mutation_fail_closed() -> N
 
 
 def test_generic_cli_cannot_accept_reserved_semantic_stage(
-    queue: Queue, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    queue: Queue,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(
+        "tools.phase4_v2.queue.cli.assert_queue_service_deployment", lambda _queue: None
+    )
     graph = _graph(queue, "cluster-cli", ("alpha",), tmp_path / "graph")
     materialize_cluster_graph(queue, graph)
     lease = _claim(queue, WorkStage.PACKAGE_AUDIT, "audit")
