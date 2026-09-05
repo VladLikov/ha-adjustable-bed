@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import NoReturn
 
 from .core import ORCHESTRATION_KINDS, Lease, Queue, QueueError, TerminalOutcome
+from .deployment import assert_queue_service_deployment
 from .fanout import publish_tracker_fanout
 from .github_contents import GitHubContentsError
 from .github_tree import GitHubTreeGateway
@@ -194,6 +195,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         busy_timeout_ms=args.busy_timeout_ms,
     )
     try:
+        assert_queue_service_deployment(queue)
         queue.verify_schema()
         if args.command == "claim":
             lease = queue.claim(args.owner, ttl_seconds=args.ttl_seconds)

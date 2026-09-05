@@ -11,9 +11,9 @@ from typing import NoReturn
 
 from .model import IRDiagnostic, IRValidationError
 
-MIGRATION_REVISION = "phase4-analysis-v1.12-to-ir-v1.2"
+MIGRATION_REVISION = "phase4-analysis-v1.12-to-ir-v1.3"
 SOURCE_SCHEMA_REVISION = "phase4-analysis-v1.12-2026-07-26"
-TARGET_SCHEMA_REVISION = "phase4-protocol-ir-v1.2.0-2026-09-03"
+TARGET_SCHEMA_REVISION = "phase4-protocol-ir-v1.3.0-2026-09-05"
 _MAX_BYTES = 64 * 1024**2
 _MAX_DEPTH = 128
 _MAX_NODES = 2_000_000

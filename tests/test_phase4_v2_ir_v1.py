@@ -452,6 +452,86 @@ def test_packet_constant_must_match_declared_width(constant: str) -> None:
         )
 
 
+def test_counter_source_is_rejected_until_its_lifecycle_is_modeled() -> None:
+    data = _document()
+    fields = data["packet_fields"]
+    assert isinstance(fields, dict)
+    fields["strength_field"] = {
+        "offset": 0,
+        "width": 1,
+        "source": "COUNTER",
+        "source_ref": "sequence",
+        "transforms": [],
+    }
+
+    with pytest.raises(IRValidationError, match="unknown_domain_enum"):
+        _load(data)
+
+
+@pytest.mark.parametrize("algorithm", ["CRC8", "CRC16", "CUSTOM"])
+def test_underspecified_checksum_algorithms_are_rejected(algorithm: str) -> None:
+    data = _document()
+    checksums = data["checksums"]
+    assert isinstance(checksums, dict)
+    checksums["checksum"]["algorithm"] = algorithm
+
+    with pytest.raises(IRValidationError, match="unknown_domain_enum"):
+        _load(data)
+
+
+@pytest.mark.parametrize("operand", [True, "1", -1, 2**63])
+def test_arithmetic_transform_requires_a_nonnegative_integer(operand: object) -> None:
+    data = _document()
+    transforms = data["transforms"]
+    assert isinstance(transforms, dict)
+    transforms["xor"]["operand"] = operand
+
+    with pytest.raises(IRValidationError, match="expected_integer|integer_out_of_range"):
+        _load(data)
+
+
+def test_arithmetic_transform_operand_must_fit_each_target_field() -> None:
+    data = _document()
+    transforms = data["transforms"]
+    assert isinstance(transforms, dict)
+    transforms["xor"]["operand"] = 256
+
+    with pytest.raises(IRValidationError, match="transform_operand_out_of_range"):
+        _load(data)
+
+
+def test_duplicate_discovery_domain_cannot_select_different_protocols() -> None:
+    data = _document()
+    protocols = data["protocols"]
+    selections = data["selection_rules"]
+    discoveries = data["discovery_rules"]
+    assert isinstance(protocols, dict)
+    assert isinstance(selections, dict)
+    assert isinstance(discoveries, dict)
+    protocols["other"] = {"variant_space": "variants"}
+    selections["select_other"] = {"protocol": "other", "when": {"op": "always"}}
+    discoveries["discover_other"] = {
+        "selection_rule": "select_other",
+        "matchers": copy.deepcopy(discoveries["discover"]["matchers"]),
+    }
+
+    with pytest.raises(IRValidationError, match="ambiguous_discovery_rule"):
+        _load(data)
+
+
+def test_packet_builder_checksum_must_match_its_checksum_field() -> None:
+    data = _document()
+    checksums = data["checksums"]
+    fields = data["packet_fields"]
+    assert isinstance(checksums, dict)
+    assert isinstance(fields, dict)
+    checksums["other"] = copy.deepcopy(checksums["checksum"])
+    fields["checksum_field"]["source_ref"] = "other"
+
+    with pytest.raises(IRValidationError, match="packet_builder_checksum_mismatch"):
+        _load(data)
+
+
 def test_fixed_length_parser_rejects_field_beyond_buffer() -> None:
     data = _document()
     data["bufferings"] = {"datagram": {"mode": "FIXED_LENGTH", "size": 1}}

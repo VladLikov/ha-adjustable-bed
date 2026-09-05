@@ -88,8 +88,14 @@ class _GitDataRunner:
         self.allow_force_pushes = False
 
     def __call__(
-        self, arguments: tuple[str, ...], payload: bytes | None, _timeout: int
+        self,
+        arguments: tuple[str, ...],
+        payload: bytes | None,
+        _timeout: float,
+        *,
+        deadline: float | None = None,
     ) -> CommandResult:
+        del deadline
         self.calls.append((arguments, payload))
         method = arguments[3]
         endpoint = arguments[4]
@@ -246,8 +252,14 @@ def test_tree_gateway_rejects_invalid_or_ambiguous_api_receipts(
 ) -> None:
     class InvalidRunner:
         def __call__(
-            self, _arguments: tuple[str, ...], _payload: bytes | None, _timeout: int
+            self,
+            _arguments: tuple[str, ...],
+            _payload: bytes | None,
+            _timeout: float,
+            *,
+            deadline: float | None = None,
         ) -> CommandResult:
+            del deadline
             return CommandResult(
                 0,
                 b'{"object":{"sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",'
@@ -306,6 +318,20 @@ def test_tree_gateway_bounds_total_decoded_readback(
         _gateway(monkeypatch, runner).read(paths)
 
 
+def test_tree_gateway_bounds_the_complete_readback_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = _GitDataRunner()
+    gateway = _gateway(monkeypatch, runner)
+    clock = iter((0.0, 1.0, 61.0))
+    monkeypatch.setattr(github_tree, "_monotonic", lambda: next(clock))
+
+    with pytest.raises(GitHubContentsError, match="total deadline"):
+        gateway.read(("issues/436.md",))
+
+    assert len(runner.calls) == 1
+
+
 def test_tree_gateway_reports_unresolved_uncertain_write(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -313,8 +339,14 @@ def test_tree_gateway_reports_unresolved_uncertain_write(
         patch_attempted = False
 
         def __call__(
-            self, arguments: tuple[str, ...], payload: bytes | None, timeout: int
+            self,
+            arguments: tuple[str, ...],
+            payload: bytes | None,
+            timeout: float,
+            *,
+            deadline: float | None = None,
         ) -> CommandResult:
+            del deadline
             if arguments[3] == "PATCH":
                 self.patch_attempted = True
                 raise GitHubContentsError("synthetic timeout")

@@ -172,7 +172,11 @@ _FINAL_DEFINITIONS: dict[str, object] = {
         ("operation",),
         {
             "operation": _enum(TransformOperation),
-            "operand": {"$ref": "#/$defs/selector_scalar"},
+            "operand": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 2**63 - 1,
+            },
             "lookup": {
                 "type": "array",
                 "maxItems": 4096,
@@ -192,7 +196,7 @@ _FINAL_DEFINITIONS: dict[str, object] = {
             "algorithm": _enum(ChecksumAlgorithm),
             "start_byte": {"type": "integer", "minimum": 0},
             "end_byte": {"type": "integer", "minimum": 1},
-            "output_width": {"type": "integer", "minimum": 1},
+            "output_width": {"const": 1},
         },
     ),
     "framings_map": _map("framing"),

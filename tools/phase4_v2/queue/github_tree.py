@@ -25,6 +25,7 @@ _MAX_DOCUMENT_SET_BYTES = 4 * 1024 * 1024
 _MAX_JSON_DEPTH = 32
 _MAX_JSON_NODES = 10_000
 _TIMEOUT_SECONDS = 60
+_monotonic = time.monotonic
 
 class GitHubTreePostWriteUnknownError(GitHubContentsError):
     """A failed ref transport may have made the commit visible."""
@@ -52,7 +53,8 @@ class GitHubTreeGateway:
         """Read all requested files from one immutable commit revision."""
 
         canonical_paths = _paths(paths)
-        revision = self._read_ref()
+        deadline = _monotonic() + _TIMEOUT_SECONDS
+        revision = self._read_ref(deadline=deadline)
         documents: list[TrackerDocument] = []
         total_bytes = 0
         for path in canonical_paths:
@@ -65,7 +67,8 @@ class GitHubTreeGateway:
                     f"repos/{self._repository}/contents/{quote(path, safe='/')}",
                     "-f",
                     f"ref={revision}",
-                )
+                ),
+                deadline=deadline,
             )
             if result.returncode != 0:
                 if _is_not_found(result.stderr):
@@ -227,18 +230,27 @@ class GitHubTreeGateway:
             "GitHub tracker ref update outcome is unknown"
         ) from error
 
-    def _read_ref(self) -> str:
+    def _read_ref(self, *, deadline: float | None = None) -> str:
         response = self._get(
             f"repos/{self._repository}/git/ref/heads/{quote(self._branch, safe='/')}",
             "read tracker ref",
+            deadline=deadline,
         )
         target = response.get("object")
         if type(target) is not dict or target.get("type") != "commit":
             raise GitHubContentsError("GitHub tracker ref is not a commit")
         return _object_id(target.get("sha"), "tracker ref")
 
-    def _get(self, endpoint: str, operation: str) -> dict[str, object]:
-        result = self._call(("gh", "api", "--method", "GET", endpoint))
+    def _get(
+        self,
+        endpoint: str,
+        operation: str,
+        *,
+        deadline: float | None = None,
+    ) -> dict[str, object]:
+        result = self._call(
+            ("gh", "api", "--method", "GET", endpoint), deadline=deadline
+        )
         if result.returncode != 0:
             raise GitHubContentsError(_error(operation, result.stderr))
         return _object(result.stdout)
@@ -261,15 +273,30 @@ class GitHubTreeGateway:
             raise GitHubContentsError("GitHub tracker request exceeds its byte limit")
         return self._call(("gh", "api", "--method", method, endpoint, "--input", "-"), body)
 
-    def _call(self, arguments: tuple[str, ...], payload: bytes | None = None) -> CommandResult:
-        result = _run_gh(arguments, payload, _TIMEOUT_SECONDS)
+    def _call(
+        self,
+        arguments: tuple[str, ...],
+        payload: bytes | None = None,
+        *,
+        deadline: float | None = None,
+    ) -> CommandResult:
+        timeout_seconds: float = _TIMEOUT_SECONDS
+        if deadline is not None:
+            timeout_seconds = deadline - _monotonic()
+            if timeout_seconds <= 0:
+                raise GitHubContentsError("GitHub tracker read exceeded its total deadline")
+        result = _run_gh(arguments, payload, timeout_seconds, deadline=deadline)
         if type(result) is not CommandResult:
             raise GitHubContentsError("GitHub tree command runner returned an invalid result")
         return result
 
 
 def _run_gh(
-    arguments: tuple[str, ...], payload: bytes | None, timeout_seconds: int
+    arguments: tuple[str, ...],
+    payload: bytes | None,
+    timeout_seconds: float,
+    *,
+    deadline: float | None = None,
 ) -> CommandResult:
     if arguments[:2] != ("gh", "api"):
         raise GitHubContentsError("tracker transport permits only GitHub API operations")
@@ -304,12 +331,23 @@ def _run_gh(
             with tempfile.TemporaryFile() as input_file:
                 input_file.write(payload or b"")
                 input_file.seek(0)
+                if deadline is not None and deadline <= _monotonic():
+                    raise GitHubContentsError(
+                        "GitHub tracker read exceeded its total deadline"
+                    )
                 with subprocess.Popen(
-                    command, stdin=input_file, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                    env=environment, cwd=config_directory, pass_fds=(executable_fd,),
+                    command,
+                    stdin=input_file,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    env=environment,
+                    cwd=config_directory,
+                    pass_fds=(executable_fd,),
                 ) as process:
                     try:
-                        result = _read_bounded_process(process, timeout_seconds)
+                        result = _read_bounded_process(
+                            process, timeout_seconds, deadline=deadline
+                        )
                     except BaseException:
                         process.kill()
                         process.wait()
@@ -332,18 +370,27 @@ def _run_gh(
             os.close(executable_fd)
 
 
-def _read_bounded_process(process: subprocess.Popen[bytes], timeout_seconds: int) -> CommandResult:
+def _read_bounded_process(
+    process: subprocess.Popen[bytes],
+    timeout_seconds: float,
+    *,
+    deadline: float | None = None,
+) -> CommandResult:
     """Drain both pipes concurrently and stop before retaining an oversized response."""
     assert process.stdout is not None and process.stderr is not None
     streams = {process.stdout: bytearray(), process.stderr: bytearray()}
-    deadline = time.monotonic() + timeout_seconds
+    bounded_deadline = deadline if deadline is not None else _monotonic() + timeout_seconds
     total = 0
     with selectors.DefaultSelector() as selector:
         for stream in streams:
             selector.register(stream, selectors.EVENT_READ)
         while selector.get_map():
-            remaining = deadline - time.monotonic()
+            remaining = bounded_deadline - _monotonic()
             if remaining <= 0:
+                if deadline is not None:
+                    raise GitHubContentsError(
+                        "GitHub tracker read exceeded its total deadline"
+                    )
                 raise subprocess.TimeoutExpired(process.args, timeout_seconds)
             for key, _events in selector.select(remaining):
                 chunk = os.read(key.fd, min(65536, _MAX_RESPONSE_BYTES - total + 1))
@@ -355,7 +402,10 @@ def _read_bounded_process(process: subprocess.Popen[bytes], timeout_seconds: int
                     raise GitHubContentsError("GitHub CLI response exceeds the configured limit")
                 stream = process.stdout if key.fd == process.stdout.fileno() else process.stderr
                 streams[stream].extend(chunk)
-    code = process.wait(timeout=max(0, deadline - time.monotonic()))
+    remaining = bounded_deadline - _monotonic()
+    if remaining <= 0 and deadline is not None:
+        raise GitHubContentsError("GitHub tracker read exceeded its total deadline")
+    code = process.wait(timeout=max(0, remaining))
     return CommandResult(code, bytes(streams[process.stdout]), bytes(streams[process.stderr]))
 
 

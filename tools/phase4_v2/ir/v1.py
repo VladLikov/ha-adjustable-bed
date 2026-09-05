@@ -13,7 +13,7 @@ from typing import ClassVar, cast
 
 from . import model as core
 
-FINAL_SCHEMA_REVISION = "phase4-protocol-ir-v1.2.0-2026-09-03"
+FINAL_SCHEMA_REVISION = "phase4-protocol-ir-v1.3.0-2026-09-05"
 _MAX_DEFINITIONS = 250_000
 _MAX_REFERENCES = 4_096
 _MAX_DOMAIN_EXPANSIONS = 1_000_000
@@ -76,7 +76,6 @@ class PacketFieldSource(StrEnum):
     CONSTANT = "CONSTANT"
     ACTION_PARAMETER = "ACTION_PARAMETER"
     SELECTOR = "SELECTOR"
-    COUNTER = "COUNTER"
     CHECKSUM = "CHECKSUM"
     AUTHENTICATION = "AUTHENTICATION"
 
@@ -84,9 +83,6 @@ class PacketFieldSource(StrEnum):
 class ChecksumAlgorithm(StrEnum):
     SUM8 = "SUM8"
     XOR8 = "XOR8"
-    CRC8 = "CRC8"
-    CRC16 = "CRC16"
-    CUSTOM = "CUSTOM"
 
 
 class AuthenticationMethod(StrEnum):
@@ -965,7 +961,12 @@ def _parse_transform(raw: object, path: str) -> Transform:
     value = _object(raw, path, {"operation"}, {"operand", "lookup"})
     operation = _enum(TransformOperation, value["operation"], f"{path}.operation")
     operand = (
-        core._expect_scalar(value["operand"], f"{path}.operand") if "operand" in value else None
+        core._expect_integer(value["operand"], f"{path}.operand", minimum=0)
+        if "operand" in value
+        and operation in {TransformOperation.ADD, TransformOperation.XOR}
+        else core._expect_scalar(value["operand"], f"{path}.operand")
+        if "operand" in value
+        else None
     )
     lookup: tuple[tuple[core.JsonScalar, core.JsonScalar], ...] = ()
     if "lookup" in value:
@@ -998,11 +999,21 @@ def _parse_transform(raw: object, path: str) -> Transform:
 def _parse_checksum(raw: object, path: str) -> Checksum:
     value = _object(raw, path, {"algorithm", "start_byte", "end_byte", "output_width"})
     start = core._expect_integer(value["start_byte"], f"{path}.start_byte", minimum=0)
+    algorithm = _enum(ChecksumAlgorithm, value["algorithm"], f"{path}.algorithm")
+    output_width = core._expect_integer(
+        value["output_width"], f"{path}.output_width", minimum=1
+    )
+    if output_width != 1:
+        core._fail(
+            "invalid_checksum_width",
+            f"{path}.output_width",
+            f"{algorithm.value} produces exactly one byte",
+        )
     return Checksum(
-        _enum(ChecksumAlgorithm, value["algorithm"], f"{path}.algorithm"),
+        algorithm,
         start,
         core._expect_integer(value["end_byte"], f"{path}.end_byte", minimum=start + 1),
-        core._expect_integer(value["output_width"], f"{path}.output_width", minimum=1),
+        output_width,
     )
 
 
@@ -1313,6 +1324,35 @@ def _validate_final_references(document: FinalProtocolIRDocument) -> None:
         reference(
             "selection_rules", rule.selection_rule, f"$.discovery_rules.{rule_id}.selection_rule"
         )
+    discovery_domains: dict[
+        tuple[tuple[MatchField, MatchOperation, str | None], ...], tuple[str, str]
+    ] = {}
+    selection_rules = cast(dict[str, SelectionRule], collections["selection_rules"])
+    for rule_id, rule in document.discovery_rules:
+        selection = selection_rules.get(rule.selection_rule)
+        if selection is None:
+            continue
+        matcher_set = tuple(
+            sorted(
+                {
+                    (matcher.field, matcher.operation, matcher.value)
+                    for matcher in rule.matchers
+                },
+                key=lambda item: (item[0].value, item[1].value, item[2] or ""),
+            )
+        )
+        previous = discovery_domains.get(matcher_set)
+        if previous is not None and previous[1] != selection.protocol:
+            diagnostics.append(
+                core.IRDiagnostic(
+                    "ambiguous_discovery_rule",
+                    f"$.discovery_rules.{rule_id}",
+                    f"matcher set also selects protocol {previous[1]!r} via discovery rule "
+                    f"{previous[0]!r}",
+                )
+            )
+        else:
+            discovery_domains[matcher_set] = (rule_id, selection.protocol)
     for char_id, char in document.gatt_characteristics:
         reference("gatt_services", char.service, f"$.gatt_characteristics.{char_id}.service")
         if char.write_modes and GattCharacteristicRole.WRITE not in char.roles:
@@ -1326,6 +1366,20 @@ def _validate_final_references(document: FinalProtocolIRDocument) -> None:
     for field_id, field in document.packet_fields:
         for index, transform in enumerate(field.transforms):
             reference("transforms", transform, f"$.packet_fields.{field_id}.transforms[{index}]")
+            definition = collections["transforms"].get(transform)
+            if (
+                isinstance(definition, Transform)
+                and definition.operation in {TransformOperation.ADD, TransformOperation.XOR}
+                and isinstance(definition.operand, int)
+                and definition.operand.bit_length() > field.width * 8
+            ):
+                diagnostics.append(
+                    core.IRDiagnostic(
+                        "transform_operand_out_of_range",
+                        f"$.packet_fields.{field_id}.transforms[{index}]",
+                        "arithmetic transform operand does not fit the target field width",
+                    )
+                )
         if field.source is PacketFieldSource.ACTION_PARAMETER:
             reference(
                 "action_parameters", field.source_ref, f"$.packet_fields.{field_id}.source_ref"
@@ -1349,6 +1403,20 @@ def _validate_final_references(document: FinalProtocolIRDocument) -> None:
             reference("packet_fields", field, f"$.packet_builders.{builder_id}.fields[{index}]")
         reference("framings", builder.framing, f"$.packet_builders.{builder_id}.framing")
         reference("checksums", builder.checksum, f"$.packet_builders.{builder_id}.checksum")
+        for index, field_id in enumerate(builder.fields):
+            field = collections["packet_fields"].get(field_id)
+            if (
+                isinstance(field, PacketField)
+                and field.source is PacketFieldSource.CHECKSUM
+                and field.source_ref != builder.checksum
+            ):
+                diagnostics.append(
+                    core.IRDiagnostic(
+                        "packet_builder_checksum_mismatch",
+                        f"$.packet_builders.{builder_id}.fields[{index}]",
+                        "checksum field must reference the packet builder's declared checksum",
+                    )
+                )
         fields = sorted(
             (field.offset, field.offset + field.width)
             for field_id in builder.fields
@@ -1374,6 +1442,20 @@ def _validate_final_references(document: FinalProtocolIRDocument) -> None:
         reference("selectors", field.target_selector, f"$.parser_fields.{field_id}.target_selector")
         for index, transform in enumerate(field.transforms):
             reference("transforms", transform, f"$.parser_fields.{field_id}.transforms[{index}]")
+            definition = collections["transforms"].get(transform)
+            if (
+                isinstance(definition, Transform)
+                and definition.operation in {TransformOperation.ADD, TransformOperation.XOR}
+                and isinstance(definition.operand, int)
+                and definition.operand.bit_length() > field.width * 8
+            ):
+                diagnostics.append(
+                    core.IRDiagnostic(
+                        "transform_operand_out_of_range",
+                        f"$.parser_fields.{field_id}.transforms[{index}]",
+                        "arithmetic transform operand does not fit the target field width",
+                    )
+                )
     for parser_id, parser in document.notification_parsers:
         reference("bufferings", parser.buffering, f"$.notification_parsers.{parser_id}.buffering")
         for index, field in enumerate(parser.fields):

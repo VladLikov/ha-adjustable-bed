@@ -36,6 +36,11 @@ from tools.phase4_v2.queue.publication_config import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _protected_queue_deployment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(queue_cli, "assert_queue_service_deployment", lambda _queue: None)
+
+
 @pytest.fixture
 def queue(tmp_path: Path) -> Queue:
     instance = Queue(tmp_path / "state" / "queue.sqlite3", tmp_path / "attempts")
@@ -325,6 +330,20 @@ def test_cli_rejects_ttl_outside_sqlite_range(
     assert "ttl_seconds must be a bounded positive integer" in capsys.readouterr().err
 
 
+def test_cli_rejects_a_queue_outside_the_protected_deployment(
+    queue: Queue,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def reject(_queue: Queue) -> None:
+        raise QueueError("queue database differs from protected deployment path")
+
+    monkeypatch.setattr(queue_cli, "assert_queue_service_deployment", reject)
+
+    assert main(_args(queue, "status")) == 2
+    assert "protected deployment path" in capsys.readouterr().err
+
+
 def test_cli_accepted_finish_fails_closed_on_input_digest_mismatch(
     queue: Queue, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -576,7 +595,14 @@ def test_cli_fails_closed_when_tracker_branch_is_missing(
     lease_file, config_file = _publication_inputs(queue, tmp_path)
     calls: list[tuple[tuple[str, ...], bytes | None]] = []
 
-    def runner(arguments: tuple[str, ...], payload: bytes | None, _timeout: int) -> CommandResult:
+    def runner(
+        arguments: tuple[str, ...],
+        payload: bytes | None,
+        _timeout: float,
+        *,
+        deadline: float | None = None,
+    ) -> CommandResult:
+        del deadline
         calls.append((arguments, payload))
         return CommandResult(1, b"", b"gh: Not Found (HTTP 404)")
 
