@@ -84,7 +84,7 @@ repair a fresh FULL clean-room run or reopen unrelated accepted work by default.
 
 ## Measure improvement without another framework
 
-#542 owns the bounded workflow task; #550 owns the pilot. Freeze the pilot's
+Issue #542 owns the bounded workflow task; #550 owns the pilot. Freeze the pilot's
 8–12 accepted-artifact selection, blinded oracle, trial order, tool/workflow
 versions and telemetry before analysts start. Evaluate the first two contrasting
 cases before expanding; an early stop is not a passed benchmark. Keep all originals.
