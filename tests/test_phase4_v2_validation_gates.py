@@ -430,7 +430,7 @@ def test_genuine_authenticated_full_chain_is_accepted(case: _Case) -> None:
 
     assert first.accepted
     assert first.content_id == second.content_id
-    assert first.candidate_count == 27
+    assert first.candidate_count == 29
     assert first.action_count == 2
     assert first.variant_count == 1
     assert first.warning_count == 0

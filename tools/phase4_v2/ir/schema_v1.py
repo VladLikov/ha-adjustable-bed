@@ -9,6 +9,7 @@ from .schema import schema_document
 from .v1 import (
     FINAL_DOMAIN_COLLECTIONS,
     FINAL_SCHEMA_REVISION,
+    MAX_PACKET_BYTES,
     AuthenticationMethod,
     BufferingMode,
     CancellationMode,
@@ -215,8 +216,8 @@ _FINAL_DEFINITIONS: dict[str, object] = {
     "packet_field": _record(
         ("offset", "width", "source", "transforms"),
         {
-            "offset": {"type": "integer", "minimum": 0},
-            "width": {"type": "integer", "minimum": 1},
+            "offset": {"type": "integer", "minimum": 0, "maximum": MAX_PACKET_BYTES - 1},
+            "width": {"type": "integer", "minimum": 1, "maximum": MAX_PACKET_BYTES},
             "source": _enum(PacketFieldSource),
             "source_ref": _REF,
             "constant_hex": _HEX,

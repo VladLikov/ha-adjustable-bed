@@ -684,6 +684,32 @@ def test_packet_field_transforms_must_preserve_destination_width() -> None:
         _load(data)
 
 
+def test_constant_and_checksum_transforms_must_preserve_destination_width() -> None:
+    data = _document()
+    transforms = data["transforms"]
+    fields = data["packet_fields"]
+    assert isinstance(transforms, dict) and isinstance(fields, dict)
+    transforms["add"] = {"operation": "ADD", "operand": 1}
+    fields["stop_field"]["constant_hex"] = "ff"
+    fields["stop_field"]["transforms"] = ["add"]
+
+    with pytest.raises(IRValidationError, match="packet_field_value_out_of_range"):
+        _load(data)
+
+    data = _document()
+    transforms = data["transforms"]
+    fields = data["packet_fields"]
+    assert isinstance(transforms, dict) and isinstance(fields, dict)
+    transforms["checksum_lookup"] = {
+        "operation": "LOOKUP",
+        "lookup": [[value, "not-a-byte"] for value in range(256)],
+    }
+    fields["checksum_field"]["transforms"] = ["checksum_lookup"]
+
+    with pytest.raises(IRValidationError, match="packet_field_value_out_of_range"):
+        _load(data)
+
+
 def test_multibyte_dynamic_packet_field_requires_explicit_byte_order() -> None:
     data = _document()
     parameters = data["action_parameters"]
@@ -876,6 +902,34 @@ def test_packet_builder_fields_must_not_leave_undefined_bytes() -> None:
     fields["checksum_field"]["offset"] = 2
 
     with pytest.raises(IRValidationError, match="packet_builder_field_gap"):
+        _load(data)
+
+
+@pytest.mark.parametrize(
+    ("offset", "width"),
+    [(v1.MAX_PACKET_BYTES, 1), (0, v1.MAX_PACKET_BYTES + 1)],
+)
+def test_packet_fields_must_fit_the_ble_value_limit(offset: int, width: int) -> None:
+    with pytest.raises(IRValidationError, match="packet_field_too_large"):
+        v1._parse_packet_field(
+            {
+                "offset": offset,
+                "width": width,
+                "source": "ACTION_PARAMETER",
+                "source_ref": "strength",
+                "transforms": [],
+            },
+            "$.field",
+        )
+
+
+def test_framed_packet_must_fit_the_ble_value_limit() -> None:
+    data = _document()
+    framings = data["framings"]
+    assert isinstance(framings, dict)
+    framings["frame"]["prefix_hex"] = "aa" * (v1.MAX_PACKET_BYTES - 1)
+
+    with pytest.raises(IRValidationError, match="packet_builder_too_large"):
         _load(data)
 
 
@@ -1126,6 +1180,65 @@ def test_release_requires_unique_mapping_for_same_protocol_and_profile(mutation:
         parameters["stop_mode"] = {"action": "stop", "values": [1, 2]}
     with pytest.raises(IRValidationError, match="unresolved_release_action"):
         _load(data)
+
+
+def test_release_actions_must_terminate() -> None:
+    data = _document()
+    timings = data["timings"]
+    assert isinstance(timings, dict)
+    timings["stop_timing"] = {
+        "repeat_count": 1,
+        "repeat_interval_ms": 0,
+        "cancellation": "AFTER_FRAME",
+        "release": "STOP_ACTION",
+        "release_action": "stop",
+    }
+
+    with pytest.raises(IRValidationError, match="cyclic_release_action"):
+        _load(data)
+
+
+def test_action_mapping_must_consume_each_action_parameter() -> None:
+    data = _document()
+    fields = data["packet_fields"]
+    assert isinstance(fields, dict)
+    fields["strength_field"] = {
+        "offset": 0,
+        "width": 1,
+        "source": "CONSTANT",
+        "constant_hex": "01",
+        "transforms": [],
+    }
+
+    with pytest.raises(IRValidationError, match="unconsumed_action_parameter"):
+        _load(data)
+
+
+def test_action_mapping_predicate_can_consume_an_action_parameter() -> None:
+    data = _document()
+    fields = data["packet_fields"]
+    mappings = data["action_mappings"]
+    assert isinstance(fields, dict) and isinstance(mappings, dict)
+    fields["strength_field"] = {
+        "offset": 0,
+        "width": 1,
+        "source": "CONSTANT",
+        "constant_hex": "01",
+        "transforms": [],
+    }
+    mappings["raise_mapping"]["when"] = {
+        "op": "eq",
+        "dimension": "strength",
+        "value": 1,
+    }
+    mappings["raise_two"] = {
+        "protocol": "protocol",
+        "action": "raise",
+        "transport": "transport",
+        "when": {"op": "eq", "dimension": "strength", "value": 2},
+    }
+
+    _load(data)
 
 
 def test_notification_parser_accepts_indicate_role() -> None:

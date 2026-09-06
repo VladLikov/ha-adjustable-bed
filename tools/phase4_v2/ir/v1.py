@@ -17,6 +17,7 @@ FINAL_SCHEMA_REVISION = "phase4-protocol-ir-v1.4.0-2026-09-06"
 _MAX_DEFINITIONS = 250_000
 _MAX_REFERENCES = 4_096
 _MAX_DOMAIN_EXPANSIONS = 1_000_000
+MAX_PACKET_BYTES = 512
 _SAFE_DISCOVERY_REGEX = re.compile(
     r"\^?(?:(?:\\.)|(?:\[(?:\\.|[^\]\\])+\])|[^\\[\]().*+?{}|^$])*\$?"
 )
@@ -718,6 +719,26 @@ def validate_final_universe(document: FinalProtocolIRDocument) -> FinalUniverseV
         )
     expected: set[FinalUniverseKey] = set()
     actual_sources: dict[FinalUniverseKey, list[str]] = {}
+    unconsumed_sources: dict[FinalUniverseKey, list[str]] = {}
+    packet_fields = dict(document.packet_fields)
+    packet_builders = dict(document.packet_builders)
+    authentications = dict(document.authentications)
+    transports = dict(document.transports)
+    mapping_parameters: dict[str, frozenset[str]] = {}
+    for mapping_id, mapping in document.action_mappings:
+        transport = transports[mapping.transport]
+        builder_ids = [transport.packet_builder]
+        if transport.authentication is not None:
+            request_builder = authentications[transport.authentication].request_builder
+            if request_builder is not None:
+                builder_ids.append(request_builder)
+        mapping_parameters[mapping_id] = frozenset(
+            field.source_ref
+            for builder_id in builder_ids
+            for field_id in packet_builders[builder_id].fields
+            if (field := packet_fields[field_id]).source is PacketFieldSource.ACTION_PARAMETER
+            and field.source_ref is not None
+        )
     expansions = 0
     for _, rule in document.expected_action_rules:
         profiles = spaces[protocols[rule.protocol].variant_space].iter_profiles()
@@ -767,9 +788,17 @@ def validate_final_universe(document: FinalProtocolIRDocument) -> FinalUniverseV
                         tuple(zip(names, combination, strict=True)),
                     )
                     actual_sources.setdefault(key, []).append(mapping_id)
+                    if any(
+                        parameter_id not in mapping_parameters[mapping_id]
+                        and all(
+                            mapping.when.matches({**combined, parameter_id: alternative})
+                            for alternative in domain
+                        )
+                        for parameter_id, domain in parameter_domains
+                    ):
+                        unconsumed_sources.setdefault(key, []).append(mapping_id)
     actual = set(actual_sources)
     mappings = dict(document.action_mappings)
-    transports = dict(document.transports)
     timings = dict(document.timings)
     cleanup_targets: dict[
         tuple[str, str, tuple[tuple[str, core.JsonScalar], ...]], list[FinalUniverseKey]
@@ -777,6 +806,11 @@ def validate_final_universe(document: FinalProtocolIRDocument) -> FinalUniverseV
     for key in actual:
         cleanup_targets.setdefault((key.protocol, key.action, key.selectors), []).append(key)
     issues = [FinalUniverseIssue("missing_action_mapping", key, ()) for key in expected - actual]
+    issues.extend(
+        FinalUniverseIssue("unconsumed_action_parameter", key, tuple(sorted(mapping_ids)))
+        for key, mapping_ids in unconsumed_sources.items()
+    )
+    release_edges: dict[FinalUniverseKey, FinalUniverseKey] = {}
     for key, mapping_ids in actual_sources.items():
         for mapping_id in mapping_ids:
             timing = timings[transports[mappings[mapping_id].transport].timing]
@@ -785,6 +819,29 @@ def validate_final_universe(document: FinalProtocolIRDocument) -> FinalUniverseV
             targets = cleanup_targets.get((key.protocol, timing.release_action, key.selectors), [])
             if len(targets) != 1 or len(actual_sources[targets[0]]) != 1:
                 issues.append(FinalUniverseIssue("unresolved_release_action", key, (mapping_id,)))
+            elif len(mapping_ids) == 1:
+                release_edges[key] = targets[0]
+    processed: set[FinalUniverseKey] = set()
+    cyclic: set[FinalUniverseKey] = set()
+    for start in release_edges:
+        if start in processed:
+            continue
+        path: list[FinalUniverseKey] = []
+        path_indexes: dict[FinalUniverseKey, int] = {}
+        current = start
+        while current in release_edges and current not in processed and current not in path_indexes:
+            path_indexes[current] = len(path)
+            path.append(current)
+            current = release_edges[current]
+        if current in path_indexes:
+            cyclic.update(path[path_indexes[current] :])
+        processed.update(path)
+    issues.extend(
+        FinalUniverseIssue(
+            "cyclic_release_action", key, tuple(sorted(actual_sources[key]))
+        )
+        for key in cyclic
+    )
     issues.extend(
         FinalUniverseIssue("extra_action_mapping", key, tuple(sorted(actual_sources[key])))
         for key in actual - expected
@@ -796,6 +853,7 @@ def validate_final_universe(document: FinalProtocolIRDocument) -> FinalUniverseV
     )
     issues.sort(
         key=lambda issue: (
+            issue.code == "unconsumed_action_parameter",
             issue.code,
             core._canonical_json(
                 {
@@ -1174,10 +1232,17 @@ def _parse_packet_field(raw: object, path: str) -> PacketField:
             "field source requires exactly its matching payload",
         )
     width = core._expect_integer(value["width"], f"{path}.width", minimum=1)
+    offset = core._expect_integer(value["offset"], f"{path}.offset", minimum=0)
+    if offset + width > MAX_PACKET_BYTES:
+        core._fail(
+            "packet_field_too_large",
+            path,
+            f"packet field ends beyond the {MAX_PACKET_BYTES}-byte BLE value limit",
+        )
     if constant is not None and len(bytes.fromhex(constant)) != width:
         core._fail("invalid_packet_field_width", path, "constant byte length must equal width")
     return PacketField(
-        core._expect_integer(value["offset"], f"{path}.offset", minimum=0),
+        offset,
         width,
         source,
         source_ref,
@@ -1523,7 +1588,9 @@ def _validate_final_references(document: FinalProtocolIRDocument) -> None:
             )
     for field_id, field in document.packet_fields:
         source_domain: tuple[core.JsonScalar, ...] | None = None
-        if field.source is PacketFieldSource.ACTION_PARAMETER:
+        if field.source is PacketFieldSource.CONSTANT and field.constant_hex is not None:
+            source_domain = (int(field.constant_hex, 16),)
+        elif field.source is PacketFieldSource.ACTION_PARAMETER:
             parameter = collections["action_parameters"].get(field.source_ref or "")
             if isinstance(parameter, ActionParameter):
                 source_domain = parameter.values
@@ -1531,6 +1598,10 @@ def _validate_final_references(document: FinalProtocolIRDocument) -> None:
             selector = collections["selectors"].get(field.source_ref or "")
             if isinstance(selector, SelectorDefinition):
                 source_domain = selector.values
+        elif field.source is PacketFieldSource.CHECKSUM:
+            checksum = collections["checksums"].get(field.source_ref or "")
+            if isinstance(checksum, Checksum):
+                source_domain = tuple(range(1 << (checksum.output_width * 8)))
         if field.width > 1 and field.source in {
             PacketFieldSource.ACTION_PARAMETER,
             PacketFieldSource.SELECTOR,
@@ -1661,6 +1732,21 @@ def _validate_final_references(document: FinalProtocolIRDocument) -> None:
             if isinstance(collections["packet_fields"].get(field_id), PacketField)
         )
         framing = collections["framings"].get(builder.framing)
+        payload_bytes = max((field.offset + field.width for field in builder_fields), default=0)
+        if (
+            isinstance(framing, Framing)
+            and payload_bytes
+            + len(bytes.fromhex(framing.prefix_hex))
+            + len(bytes.fromhex(framing.suffix_hex))
+            > MAX_PACKET_BYTES
+        ):
+            diagnostics.append(
+                core.IRDiagnostic(
+                    "packet_builder_too_large",
+                    f"$.packet_builders.{builder_id}",
+                    f"framed packet exceeds the {MAX_PACKET_BYTES}-byte BLE value limit",
+                )
+            )
         if (
             isinstance(framing, Framing)
             and framing.length_field is not None
