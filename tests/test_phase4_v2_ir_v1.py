@@ -744,6 +744,65 @@ def test_partially_overlapping_discovery_domains_cannot_select_different_protoco
         _load(data)
 
 
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [
+        (
+            {"field": "SERVICE_UUID", "operation": "EQUALS", "value": "1234"},
+            {"field": "SERVICE_UUID", "operation": "EQUALS", "value": "5678"},
+        ),
+        (
+            {
+                "field": "MANUFACTURER_DATA",
+                "operation": "EQUALS",
+                "key": 1,
+                "value_hex": "01",
+            },
+            {
+                "field": "MANUFACTURER_DATA",
+                "operation": "EQUALS",
+                "key": 2,
+                "value_hex": "02",
+            },
+        ),
+        (
+            {
+                "field": "SERVICE_DATA",
+                "operation": "EQUALS",
+                "key": "1234",
+                "value_hex": "01",
+            },
+            {
+                "field": "SERVICE_DATA",
+                "operation": "EQUALS",
+                "key": "5678",
+                "value_hex": "02",
+            },
+        ),
+    ],
+)
+def test_coexistent_advertisement_entries_cannot_select_different_protocols(
+    first: dict[str, object], second: dict[str, object]
+) -> None:
+    data = _document()
+    protocols = data["protocols"]
+    selections = data["selection_rules"]
+    discoveries = data["discovery_rules"]
+    assert isinstance(protocols, dict)
+    assert isinstance(selections, dict)
+    assert isinstance(discoveries, dict)
+    protocols["other"] = {"variant_space": "variants"}
+    selections["select_other"] = {"protocol": "other", "when": {"op": "always"}}
+    discoveries["discover"]["matchers"] = [first]
+    discoveries["discover_other"] = {
+        "selection_rule": "select_other",
+        "matchers": [second],
+    }
+
+    with pytest.raises(IRValidationError, match="ambiguous_discovery_rule"):
+        _load(data)
+
+
 def test_discovery_selection_rule_must_match_a_valid_profile() -> None:
     data = _document()
     selections = data["selection_rules"]
@@ -913,6 +972,55 @@ def test_pin_request_builder_must_emit_authentication_value() -> None:
     ]
 
     with pytest.raises(IRValidationError, match="authentication_exchange_missing_credential"):
+        _load(data)
+
+
+@pytest.mark.parametrize("builder_target", ["command", "authentication"])
+def test_transport_builders_require_the_attached_non_none_authentication(
+    builder_target: str,
+) -> None:
+    data = _document()
+    fields = data["packet_fields"]
+    builders = data["packet_builders"]
+    authentications = data["authentications"]
+    lifecycles = data["lifecycles"]
+    transports = data["transports"]
+    assert isinstance(fields, dict) and isinstance(builders, dict)
+    assert isinstance(authentications, dict) and isinstance(lifecycles, dict)
+    assert isinstance(transports, dict)
+    fields["command_auth"] = {
+        "offset": 2,
+        "width": 1,
+        "source": "AUTHENTICATION",
+        "source_ref": "auth",
+        "transforms": [],
+    }
+    fields["request_auth"] = {
+        "offset": 0,
+        "width": 1,
+        "source": "AUTHENTICATION",
+        "source_ref": "auth",
+        "transforms": [],
+    }
+    builders["builder"]["fields"].append("command_auth")
+    builders["auth_builder"] = {"fields": ["request_auth"], "framing": "frame"}
+    authentications["auth"] = {
+        "method": "PIN",
+        "selectors": ["remote_code"],
+        "request_builder": "auth_builder",
+    }
+    lifecycles["command"]["phases"] = [
+        "CONNECT",
+        "AUTHENTICATE",
+        "START_NOTIFY",
+        "WRITE",
+        "DISCONNECT",
+    ]
+    transports["transport"]["authentication"] = "auth"
+    target_field = "command_auth" if builder_target == "command" else "request_auth"
+    fields[target_field]["source_ref"] = "none"
+
+    with pytest.raises(IRValidationError, match="transport_authentication_field_mismatch"):
         _load(data)
 
 

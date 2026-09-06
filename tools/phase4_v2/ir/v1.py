@@ -989,8 +989,12 @@ def _discovery_domains_may_overlap(
 
 
 def _matchers_may_share_value(left: DiscoveryMatcher, right: DiscoveryMatcher) -> bool:
+    if left.field is not right.field:
+        return True
+    if left.field is MatchField.SERVICE_UUID:
+        return True
     if left.key != right.key:
-        return False
+        return True
     if MatchOperation.PRESENT in {left.operation, right.operation}:
         return True
     if left.operation is MatchOperation.EQUALS and right.operation is MatchOperation.EQUALS:
@@ -1915,6 +1919,38 @@ def _validate_final_references(document: FinalProtocolIRDocument) -> None:
         char = collections["gatt_characteristics"].get(transport.characteristic)
         lifecycle = collections["lifecycles"].get(transport.lifecycle)
         authentication = collections["authentications"].get(transport.authentication or "")
+        reachable_builder_ids = [transport.packet_builder]
+        if (
+            isinstance(authentication, Authentication)
+            and authentication.request_builder is not None
+            and authentication.request_builder not in reachable_builder_ids
+        ):
+            reachable_builder_ids.append(authentication.request_builder)
+        attached_authentication = (
+            transport.authentication
+            if isinstance(authentication, Authentication)
+            and authentication.method is not AuthenticationMethod.NONE
+            else None
+        )
+        for builder_id in reachable_builder_ids:
+            builder = collections["packet_builders"].get(builder_id)
+            if not isinstance(builder, PacketBuilder):
+                continue
+            for field_id in builder.fields:
+                field = collections["packet_fields"].get(field_id)
+                if (
+                    isinstance(field, PacketField)
+                    and field.source is PacketFieldSource.AUTHENTICATION
+                    and field.source_ref != attached_authentication
+                ):
+                    diagnostics.append(
+                        core.IRDiagnostic(
+                            "transport_authentication_field_mismatch",
+                            f"$.transports.{transport_id}",
+                            f"reachable packet field {field_id!r} must reference the transport's "
+                            "exact non-NONE authentication",
+                        )
+                    )
         authentication_response_parser = (
             authentication.response_parser if isinstance(authentication, Authentication) else None
         )
