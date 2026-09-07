@@ -290,6 +290,32 @@ class AdjustableBedCover(AdjustableBedEntity, CoverEntity):
         self._move_direction: str | None = None
         self._movement_generation: int = 0  # Track active movement to handle cancellation
 
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        if self._has_feedback_seek:
+            self.async_on_remove(self._coordinator.register_position_callback(self._position_changed))
+            self.async_on_remove(self._coordinator.register_connection_state_callback(self._position_changed))
+
+    def _position_changed(self, *args: Any) -> None:
+        self.async_write_ha_state()
+
+    @property
+    def _has_feedback_seek(self) -> bool:
+        return self._position_key in self._coordinator.feedback_seek_axes
+
+    @property
+    def supported_features(self) -> CoverEntityFeature:
+        features = CoverEntityFeature(self._attr_supported_features or 0)
+        if self._has_feedback_seek:
+            features |= CoverEntityFeature.SET_POSITION
+        return features
+
+    def _measured_percentage(self) -> float | None:
+        client = self._coordinator.client
+        if client is None or not client.is_connected:
+            return None
+        return self._coordinator.position_data.get(self._position_key)
+
     @property
     def _position_key(self) -> str:
         """Return the key to look up in position_data."""
@@ -298,6 +324,9 @@ class AdjustableBedCover(AdjustableBedEntity, CoverEntity):
     @property
     def is_closed(self) -> bool | None:
         """Return if the cover is closed (flat position)."""
+        if self._has_feedback_seek:
+            position = self._measured_percentage()
+            return None if position is None else position <= 0.5
         if self._coordinator.disable_angle_sensing:
             return None
         # We don't have position feedback for all motor types
@@ -311,16 +340,27 @@ class AdjustableBedCover(AdjustableBedEntity, CoverEntity):
     @property
     def is_opening(self) -> bool:
         """Return if the cover is opening."""
+        controller = self._coordinator.controller
+        if self._has_feedback_seek and controller is not None:
+            axis, up = controller.position_motion
+            return axis == self._position_key and up is True
         return self._is_moving and self._move_direction == "open"
 
     @property
     def is_closing(self) -> bool:
         """Return if the cover is closing."""
+        controller = self._coordinator.controller
+        if self._has_feedback_seek and controller is not None:
+            axis, up = controller.position_motion
+            return axis == self._position_key and up is False
         return self._is_moving and self._move_direction == "close"
 
     @property
     def current_cover_position(self) -> int | None:
         """Return current position of cover."""
+        if self._has_feedback_seek:
+            position = self._measured_percentage()
+            return None if position is None else round(min(100, max(0, position)))
         if self._coordinator.disable_angle_sensing:
             return None
         # Get position from position data if available
@@ -338,16 +378,34 @@ class AdjustableBedCover(AdjustableBedEntity, CoverEntity):
         max_angle = self.entity_description.max_angle
         return max(0, min(100, int((position / max_angle) * 100)))
 
+    async def async_set_cover_position(self, **kwargs: Any) -> None:
+        if not self._has_feedback_seek:
+            raise NotImplementedError("This controller does not expose native position seeking")
+        description = self.entity_description
+        await self._coordinator.async_seek_position(
+            self._position_key, kwargs["position"], description.open_fn,
+            description.close_fn, description.stop_fn,
+        )
+
     async def async_open_cover(self, **kwargs: Any) -> None:
         """Open the cover (raise the motor)."""
+        if self._has_feedback_seek:
+            await self.async_set_cover_position(position=100)
+            return
         await self._async_start_movement("open")
 
     async def async_close_cover(self, **kwargs: Any) -> None:
         """Close the cover (lower the motor)."""
+        if self._has_feedback_seek:
+            await self.async_set_cover_position(position=0)
+            return
         await self._async_start_movement("close")
 
     async def async_stop_cover(self, **kwargs: Any) -> None:
         """Stop the cover."""
+        if self._has_feedback_seek:
+            await self._coordinator.async_stop_command()
+            return
         await self._async_stop_movement()
 
     async def _async_start_movement(self, direction: str) -> None:

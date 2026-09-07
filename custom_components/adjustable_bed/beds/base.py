@@ -599,6 +599,20 @@ class BedController(ABC):
         """
         self._notify_callback = None
 
+    @property
+    def feedback_seek_axes(self) -> tuple[str, ...]:
+        """Percentage axes whose complete seek is owned by the controller."""
+        return ()
+
+    @property
+    def position_motion(self) -> tuple[str | None, bool | None]:
+        """Axis and direction of a controller-owned seek, if any."""
+        return None, None
+
+    async def async_feedback_seek(self, axis: str, target: float) -> None:
+        """Acquire fresh feedback and seek, inside the coordinator command lock."""
+        raise NotImplementedError
+
     async def read_positions(self, motor_count: int = 2) -> None:  # noqa: B027
         """Read current position data from all motor position characteristics.
 

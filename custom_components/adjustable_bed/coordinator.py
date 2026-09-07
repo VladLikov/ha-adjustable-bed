@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import inspect
 import logging
+import math
 import random
 import time
 import traceback
@@ -314,6 +315,7 @@ class AdjustableBedCoordinator:
 
         # Position data from notifications
         self._position_data: dict[str, float] = {}
+        self._feedback_seek_axes: tuple[str, ...] = ()
         self._position_callbacks: set[Callable[[dict[str, float]], None]] = set()
         self._controller_state: dict[str, Any] = {}
         self._controller_state_callbacks: set[Callable[[dict[str, Any]], None]] = set()
@@ -2471,6 +2473,7 @@ class AdjustableBedCoordinator:
                     ble_model=ble_model,
                     manufacturer_data=manufacturer_data,
                 )
+                self._feedback_seek_axes = self._controller.feedback_seek_axes
                 self._controller_state_refresh_retry_count = 0
                 self._controller_state_refresh_completed = False
                 # Remember the resolved persistence so reconnect/idle decisions are
@@ -3795,6 +3798,25 @@ class AdjustableBedCoordinator:
             except Exception as err:
                 _LOGGER.warning("Position callback error: %s", err)
 
+    @property
+    def feedback_seek_axes(self) -> tuple[str, ...]:
+        """Retain discovered controller capabilities across idle disconnection."""
+        return self._feedback_seek_axes
+
+    def clear_position_feedback(self, axes: tuple[str, ...]) -> None:
+        """Invalidate measurements from an old BLE subscription."""
+        for axis in axes:
+            self._position_data.pop(axis, None)
+        self.notify_position_listeners()
+
+    def notify_position_listeners(self) -> None:
+        """Publish measured position or motion changes to native entities."""
+        for callback_fn in list(self._position_callbacks):
+            try:
+                callback_fn(self._position_data)
+            except Exception:
+                _LOGGER.exception("Position listener failed")
+
     def register_position_callback(
         self, callback_fn: Callable[[dict[str, float]], None]
     ) -> Callable[[], None]:
@@ -4116,6 +4138,22 @@ class AdjustableBedCoordinator:
             move_down_fn: Async function to move motor down
             move_stop_fn: Async function to stop motor
         """
+        if position_key in self.feedback_seek_axes:
+            if isinstance(target_angle, bool) or not math.isfinite(target_angle) or not 0 <= target_angle <= 100:
+                raise ValueError("Position target must be finite and between 0 and 100")
+
+            async def feedback_operation(controller: BedController) -> None:
+                if position_key not in controller.feedback_seek_axes:
+                    raise ValueError("Reconnected controller no longer supports this position axis")
+                await controller.async_feedback_seek(position_key, target_angle)
+
+            await self._async_execute_controller_operation(
+                feedback_operation, cancel_running=True, skip_disconnect=False,
+                raise_on_lock_cancel=False, enable_position_polling=False,
+                read_positions_after_operation=False, operation_name="feedback_position",
+            )
+            return
+
         # Cancel any running command FIRST (before tolerance check)
         # This ensures any in-flight seek is cancelled even if new target is already satisfied
         self._cancel_counter += 1

@@ -50,6 +50,7 @@ from .const import (
     BED_TYPE_DIAGNOSTIC,
     BED_TYPE_JENSEN,
     BED_TYPE_KAIDI,
+    BED_TYPE_KEESON,
     BED_TYPE_LEGGETT_GEN2,
     BED_TYPE_LEGGETT_OKIN,
     BED_TYPE_LEGGETT_PLATT,
@@ -2867,6 +2868,18 @@ class AdjustableBedOptionsFlow(OptionsFlowWithConfigEntry):
                 )
             ] = vol.In(variants)
 
+        if bed_type == BED_TYPE_KEESON and form_variant == "ergomotion":
+            from .position_profile import (
+                CONF_ALLOW_MOTION_PROBE,
+                CONF_BACK_RAW_MAX,
+                CONF_CALIBRATED_POSITION,
+                CONF_LEGS_RAW_MAX,
+            )
+            schema_dict[vol.Optional(CONF_CALIBRATED_POSITION, default=current_data.get(CONF_CALIBRATED_POSITION, False))] = bool
+            for key in (CONF_BACK_RAW_MAX, CONF_LEGS_RAW_MAX):
+                schema_dict[vol.Optional(key, default=current_data.get(key, 0))] = vol.All(vol.Coerce(int), vol.Range(min=0, max=65534))
+            schema_dict[vol.Optional(CONF_ALLOW_MOTION_PROBE, default=current_data.get(CONF_ALLOW_MOTION_PROBE, False))] = bool
+
         # Add PIN field for Octo beds
         if bed_type == BED_TYPE_OCTO:
             schema_dict[
@@ -3092,6 +3105,21 @@ class AdjustableBedOptionsFlow(OptionsFlowWithConfigEntry):
                         data_schema=vol.Schema(schema_dict),
                         errors={CONF_LEGS_MAX_ANGLE: "invalid_angle"},
                     )
+            from .position_profile import PROFILE_KEYS, PositionProfile
+
+            profile_data = {**self.config_entry.data, **self._pending_data, **user_input}
+            if bed_type != BED_TYPE_KEESON or requested_variant != "ergomotion":
+                for key in PROFILE_KEYS:
+                    profile_data.pop(key, None)
+                    user_input.pop(key, None)
+                    self._pending_data.pop(key, None)
+            try:
+                PositionProfile.from_data(profile_data)
+            except ValueError:
+                return self.async_show_form(
+                    step_id="init", data_schema=vol.Schema(schema_dict),
+                    errors={"base": "invalid_position_profile"},
+                )
             # All validations passed - now it is safe to commit global state.
             if discovery_disabled_input is not None:
                 await async_set_discovery_disabled(self.hass, discovery_disabled_input)
@@ -3101,6 +3129,9 @@ class AdjustableBedOptionsFlow(OptionsFlowWithConfigEntry):
             # copy while saving unrelated options so it cannot become a second
             # source of truth.
             new_data.pop(CONF_DISABLE_DISCOVERY, None)
+            if bed_type != BED_TYPE_KEESON or requested_variant != "ergomotion":
+                for key in PROFILE_KEYS:
+                    new_data.pop(key, None)
             previous_bed_type = self.config_entry.data.get(CONF_BED_TYPE)
             if not isinstance(previous_bed_type, str):
                 previous_bed_type = BED_TYPE_DIAGNOSTIC

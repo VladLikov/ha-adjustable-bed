@@ -322,7 +322,11 @@
           "octo_pin": "Octo PIN",
           "jensen_pin": "Jensen PIN",
           "back_max_angle": "Maximum back angle (degrees)",
-          "legs_max_angle": "Maximum legs angle (degrees)"
+          "legs_max_angle": "Maximum legs angle (degrees)",
+          "keeson_calibrated_position": "Calibrated EDFE16 positions (two motors)",
+          "keeson_back_raw_max": "Measured back sensor maximum (raw)",
+          "keeson_legs_raw_max": "Measured legs sensor maximum (raw)",
+          "keeson_allow_motion_probe": "Allow brief feedback probes on explicit position commands"
         },
         "data_description": {
           "bed_type": "Controller protocol used for this device. After you select a different type, submit once to load its protocol-specific settings, review them, then submit again to save. Connected GATT evidence may correct an incompatible shared-UUID choice.",
@@ -352,7 +356,8 @@
       "invalid_number": "Please enter valid numbers for motor pulse count and delay.",
       "invalid_pin": "PIN must be empty or exactly 4 digits.",
       "invalid_motor_count_for_bed_type": "One motor is supported only for Standard OCTO TV lift controllers.",
-      "invalid_angle": "Angle must be a positive number between 0 and 180 degrees."
+      "invalid_angle": "Angle must be a positive number between 0 and 180 degrees.",
+      "invalid_position_profile": "Calibration requires Keeson/Ergomotion, two motors, angle sensing enabled and both measured raw maxima greater than zero."
     }
   },
   "entity": {

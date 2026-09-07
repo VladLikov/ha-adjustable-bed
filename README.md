@@ -1,3 +1,5 @@
+> **Personal calibrated-position fork:** based on upstream v3.7.1, with opt-in EDFE16 calibration and native percentage covers. Hardware acceptance of this source port is pending. See [configuration and limits](docs/CALIBRATED_KEESON.md). Upstream information follows below.
+
 <p align="center">
   <img src="docs/header.png" alt="Adjustable Bed Integration for Home Assistant">
 </p>

@@ -680,6 +680,13 @@ async def create_controller(
             )
         elif keeson_variant == KEESON_VARIANT_ERGOMOTION:
             _LOGGER.debug("Using Ergomotion Keeson variant (with position feedback)")
+            from .position_profile import PositionProfile
+
+            profile = PositionProfile.from_data(coordinator.entry.data)
+            if profile is not None:
+                from .beds.keeson_calibrated import CalibratedKeesonController
+
+                return CalibratedKeesonController(coordinator, profile)
             return KeesonController(coordinator, variant="ergomotion")
         elif keeson_variant == KEESON_VARIANT_OKIN:
             _LOGGER.debug("Using OKIN FFE Keeson variant (0xE6 prefix)")
