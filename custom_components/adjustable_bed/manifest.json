@@ -200,12 +200,12 @@
       "service_uuid": "db801000-f324-29c3-38d1-85c0c2e86885"
     }
   ],
-  "codeowners": ["@kristofferR"],
+  "codeowners": ["@VladLikov"],
   "config_flow": true,
   "dependencies": ["bluetooth_adapters", "http"],
   "documentation": "https://github.com/VladLikov/ha-adjustable-bed/blob/askona-position/docs/CALIBRATED_KEESON.md",
   "iot_class": "local_push",
   "issue_tracker": "https://github.com/VladLikov/ha-adjustable-bed/issues",
   "requirements": ["bleak>=1.0.0", "bleak-retry-connector>=3.5.0"],
-  "version": "3.7.1+askona.1"
+  "version": "3.7.1+askona.2"
 }

@@ -1,15 +1,14 @@
-> **Personal calibrated-position fork:** based on upstream v3.7.1, with opt-in EDFE16 calibration and native percentage covers. Hardware acceptance of this source port is pending. See [configuration and limits](docs/CALIBRATED_KEESON.md). Upstream information follows below.
+> **VladLikov calibrated-position fork:** based on upstream v3.7.1, with opt-in EDFE16 calibration and native percentage covers. Hardware acceptance of this source port is pending. See [configuration and limits](docs/CALIBRATED_KEESON.md). Original integration by [kristofferR](https://github.com/kristofferR/ha-adjustable-bed). Upstream feature documentation follows below.
 
 <p align="center">
-  <img src="docs/header.png" alt="Adjustable Bed Integration for Home Assistant">
+  <img src="https://raw.githubusercontent.com/VladLikov/ha-adjustable-bed/askona-position/docs/header.png" alt="Adjustable Bed Integration for Home Assistant">
 </p>
 
 <p align="center">
-  <a href="https://github.com/kristofferR/ha-adjustable-bed/releases"><img src="https://img.shields.io/github/v/release/kristofferR/ha-adjustable-bed" alt="GitHub Release"></a>
-  <a href="https://github.com/kristofferR/ha-adjustable-bed/actions/workflows/validate.yml"><img src="https://img.shields.io/github/actions/workflow/status/kristofferR/ha-adjustable-bed/validate.yml?label=validation" alt="Validation"></a>
-  <a href="https://github.com/hacs/integration"><img src="https://img.shields.io/badge/HACS-Default-blue.svg" alt="HACS"></a>
-  <img src="https://img.shields.io/badge/Home%20Assistant-2025.10%2B-blue" alt="Home Assistant 2025.10+">
-  <a href="https://github.com/sponsors/kristofferR"><img src="https://img.shields.io/badge/Sponsor-%E2%99%A1-ec6cb9" alt="Sponsor"></a>
+  <a href="https://github.com/VladLikov/ha-adjustable-bed/releases/tag/v3.7.1%2Baskona.2"><img src="https://img.shields.io/badge/release-3.7.1%2Baskona.2-blue" alt="Fork release 3.7.1+askona.2"></a>
+  <a href="https://github.com/hacs/integration"><img src="https://img.shields.io/badge/HACS-Custom-blue.svg" alt="HACS"></a>
+  <img src="https://img.shields.io/badge/Home%20Assistant-2026.6%2B-blue" alt="Home Assistant 2026.6+">
+  <a href="https://github.com/sponsors/kristofferR"><img src="https://img.shields.io/badge/Sponsor-%E2%99%A1-ec6cb9" alt="Sponsor original author"></a>
 </p>
 
 <p align="center">
@@ -18,7 +17,7 @@
 
 ## Quick Start
 
-1. **Install** via [HACS](https://hacs.xyz): Search for "Adjustable Bed" and install
+1. **Install** via [HACS](https://hacs.xyz): Add `VladLikov/ha-adjustable-bed` as a custom Integration repository and download the fork release
 2. **Discover** your bed automatically, or add manually via Settings → Integrations
 3. **Control** your bed from Home Assistant dashboards, automations, and voice assistants!
 
@@ -62,7 +61,7 @@
 
 ## Donate
 
-If you love this integration, please consider [sending a thanks my way](https://github.com/sponsors/kristofferR).
+To support the original integration author, consider [sponsoring kristofferR](https://github.com/sponsors/kristofferR).
 
 ## Supported Beds
 
