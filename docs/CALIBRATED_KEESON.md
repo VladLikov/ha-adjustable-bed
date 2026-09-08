@@ -41,6 +41,16 @@ and BLE client, including re-subscription on the same client. After disconnect,
 covers report an unknown position instead of inventing zero. A cached
 measurement is not accepted as fresh feedback for the next seek.
 
+A calibrated position request expires if command-lock waiting, connection and
+initialization take more than 10 seconds. The age is checked before preparation,
+after preparation and immediately before handing the command to the controller.
+An expired request never starts acquisition probes or target movement. A new
+explicit request is needed once the connection is ready. This is a request-age
+policy, not a shorter BLE transport timeout: an in-flight connection and its
+cleanup may still take longer, and no transport task is forcefully abandoned.
+The age limit does not interrupt a seek that started within the limit; its
+existing motion timeout and STOP cleanup remain in effect.
+
 Only an explicit position command may acquire feedback through motion. Startup,
 connection and background reads never probe. The command first waits passively
 for 0.25 seconds, then permits at most two opposite-direction probes if enabled.

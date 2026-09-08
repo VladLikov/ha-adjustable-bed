@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/VladLikov/ha-adjustable-bed/releases/tag/v3.7.1%2Baskona.4"><img src="https://img.shields.io/badge/release-3.7.1%2Baskona.4-blue" alt="Fork release 3.7.1+askona.4"></a>
+  <a href="https://github.com/VladLikov/ha-adjustable-bed/releases/tag/v3.7.1%2Baskona.5"><img src="https://img.shields.io/badge/release-3.7.1%2Baskona.5-blue" alt="Fork release 3.7.1+askona.5"></a>
   <a href="https://github.com/hacs/integration"><img src="https://img.shields.io/badge/HACS-Custom-blue.svg" alt="HACS"></a>
   <img src="https://img.shields.io/badge/Home%20Assistant-2026.6%2B-blue" alt="Home Assistant 2026.6+">
   <a href="https://github.com/sponsors/kristofferR"><img src="https://img.shields.io/badge/Sponsor-%E2%99%A1-ec6cb9" alt="Sponsor original author"></a>

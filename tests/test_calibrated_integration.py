@@ -186,3 +186,77 @@ async def test_cover_callbacks_are_removed(hass, entry, mock_coordinator_connect
         await cover.async_remove(force_remove=True)
         assert len(coordinator._position_callbacks) == before
     await coordinator.async_disconnect()
+
+
+@pytest.mark.parametrize("stage", ["queue", "connect", "auth"])
+async def test_expired_position_never_starts_after_slow_preparation(hass, entry, monkeypatch, stage):
+    from custom_components.adjustable_bed import coordinator as module
+
+    monkeypatch.setattr(module, "CALIBRATED_COMMAND_START_TIMEOUT", 0.02)
+    coordinator = AdjustableBedCoordinator(hass, entry)
+    coordinator._feedback_seek_axes = ("back", "legs")
+    controller = MagicMock()
+    controller.feedback_seek_axes = ("back", "legs")
+    controller.async_feedback_seek = AsyncMock()
+    connect_completed = asyncio.Event()
+
+    async def connect(**kwargs):
+        if stage == "connect":
+            await asyncio.sleep(0.04)
+        coordinator._controller = controller
+        connect_completed.set()
+        return True
+
+    async def auth():
+        if stage == "auth":
+            await asyncio.sleep(0.04)
+
+    if stage == "queue":
+        await coordinator._command_lock.acquire()
+    with (
+        patch.object(coordinator, "async_ensure_connected", side_effect=connect) as ensure,
+        patch.object(coordinator, "_async_refresh_controller_auth", side_effect=auth),
+    ):
+        task = asyncio.create_task(coordinator.async_seek_position("legs", 50, None, None, None))
+        if stage == "queue":
+            await asyncio.sleep(0.04)
+            coordinator._command_lock.release()
+        with pytest.raises(TimeoutError, match="expired"):
+            await task
+        controller.async_feedback_seek.assert_not_awaited()
+        if stage == "queue":
+            ensure.assert_not_awaited()
+        else:
+            assert connect_completed.is_set()  # Transport cleanup was not interrupted.
+
+        # Only a fresh explicit command may move after the link becomes usable.
+        monkeypatch.setattr(module, "CALIBRATED_COMMAND_START_TIMEOUT", 1)
+        await coordinator.async_seek_position("legs", 25, None, None, None)
+        controller.async_feedback_seek.assert_awaited_once_with("legs", 25)
+    assert not coordinator._command_lock.locked()
+
+
+async def test_start_expiry_does_not_interrupt_an_active_seek(hass, entry, monkeypatch):
+    from custom_components.adjustable_bed import coordinator as module
+
+    monkeypatch.setattr(module, "CALIBRATED_COMMAND_START_TIMEOUT", 0.03)
+    coordinator = AdjustableBedCoordinator(hass, entry)
+    coordinator._feedback_seek_axes = ("back", "legs")
+    controller = MagicMock()
+    controller.feedback_seek_axes = ("back", "legs")
+    completed = asyncio.Event()
+
+    async def seek(axis, target):
+        await asyncio.sleep(0.06)
+        completed.set()
+
+    controller.async_feedback_seek = AsyncMock(side_effect=seek)
+
+    async def prepare(name):
+        coordinator._cancel_command.clear()
+        return controller
+
+    with patch.object(coordinator, "_async_prepare_controller_operation", side_effect=prepare):
+        await coordinator.async_seek_position("legs", 50, None, None, None)
+    assert completed.is_set()
+    controller.async_feedback_seek.assert_awaited_once()

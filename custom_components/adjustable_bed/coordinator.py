@@ -167,6 +167,10 @@ if TYPE_CHECKING:
 
 T = TypeVar("T")
 _LOGGER = logging.getLogger(__name__)
+# User-command freshness policy, not a BLE timeout: let transport setup/cleanup
+# finish, but never start an old calibrated movement after a slow connection.
+CALIBRATED_COMMAND_START_TIMEOUT = 10.0
+
 _CONTROLLER_OPERATION_RECOVERY_EXCEPTIONS = (ConnectionError, RuntimeError)
 _READABLE_LIGHT_STATE_TIMEOUT = 2.0
 _READABLE_LIGHT_STATE_RETRY_DELAY = 1.0
@@ -200,6 +204,17 @@ class NotConnectedError(Exception):
 
 class NoControllerError(Exception):
     """Raised when no controller is available."""
+
+
+def _check_command_start_deadline(deadline: float | None) -> None:
+    if deadline is not None and time.monotonic() >= deadline:
+        _LOGGER.warning(
+            "Calibrated position command expired while waiting for connection or command lock; "
+            "no motor operation will be started"
+        )
+        raise TimeoutError(
+            "Calibrated position command expired before motor control; send a new command"
+        )
 
 
 class AdjustableBedCoordinator:
@@ -3510,6 +3525,7 @@ class AdjustableBedCoordinator:
         enable_position_polling: bool,
         read_positions_after_operation: bool,
         operation_name: str,
+        preparation_deadline: float | None = None,
     ) -> T | None:
         """Execute a controller operation with shared locking and connection handling."""
         if cancel_running:
@@ -3530,7 +3546,9 @@ class AdjustableBedCoordinator:
                 return None
 
             try:
+                _check_command_start_deadline(preparation_deadline)
                 controller = await self._async_prepare_controller_operation(operation_name)
+                _check_command_start_deadline(preparation_deadline)
                 if self._cancel_counter > entry_cancel_count or self._cancel_command.is_set():
                     _LOGGER.debug("Controller %s cancelled during preparation", operation_name)
                     if raise_on_lock_cancel:
@@ -4142,7 +4160,17 @@ class AdjustableBedCoordinator:
             if isinstance(target_angle, bool) or not math.isfinite(target_angle) or not 0 <= target_angle <= 100:
                 raise ValueError("Position target must be finite and between 0 and 100")
 
+            preparation_deadline = time.monotonic() + CALIBRATED_COMMAND_START_TIMEOUT
+            _LOGGER.info(
+                "Calibrated position: queued %s target %.2f%%; maximum preparation age %.1f s",
+                position_key,
+                target_angle,
+                CALIBRATED_COMMAND_START_TIMEOUT,
+            )
+
             async def feedback_operation(controller: BedController) -> None:
+                # Recheck in the operation task, including any scheduling delay.
+                _check_command_start_deadline(preparation_deadline)
                 if position_key not in controller.feedback_seek_axes:
                     raise ValueError("Reconnected controller no longer supports this position axis")
                 await controller.async_feedback_seek(position_key, target_angle)
@@ -4151,6 +4179,7 @@ class AdjustableBedCoordinator:
                 feedback_operation, cancel_running=True, skip_disconnect=False,
                 raise_on_lock_cancel=False, enable_position_polling=False,
                 read_positions_after_operation=False, operation_name="feedback_position",
+                preparation_deadline=preparation_deadline,
             )
             return
 

@@ -68,3 +68,23 @@ No hardware commands or changes to the user's HA were made. The fixed software
 pause is removed; transport and mechanical delays still limit final accuracy.
 Hardware verification of this release remains pending. Initial probes and the
 3-second final acquisition wait are unchanged.
+
+## Calibrated command preparation expiry: 3.7.1+askona.5
+
+2026-09-08, CPython 3.14.7, Home Assistant 2026.9.1.
+
+- Full suite: 2855 passed, 2 skipped in 283.55 seconds.
+- Focused calibrated controller/integration suites: 56 passed.
+- Regression failed on askona.4: an aged queued request still invoked seek.
+- New tests verify expiration after command-lock, connection and authentication
+  delays, no dispatch of expired requests, fresh subsequent commands working,
+  lock release and preservation of an active seek beyond its start-age limit.
+- Changed Python files passed Ruff and Pyright (0 errors/warnings).
+- Manifest and pyproject both identify version3.7.1+askona.5.
+- The archive's 116 component hashes match local tracked source files.
+
+No hardware commands or NAS changes were made by Codex. Physical validation is
+pending. The guard prevents stale calibrated position dispatch after preparation;
+it does not forcibly interrupt backend connect/cleanup, guarantee transport
+completion within 10 seconds, or solve the underlying proxy timeout.
+Existing initial-feedback acquisition and active-motion watchdogs are preserved.
