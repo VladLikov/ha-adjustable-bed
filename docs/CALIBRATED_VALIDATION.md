@@ -28,3 +28,23 @@ Not yet verified: installation on the user's Synology/HA 2026.8.3, physical moto
 behavior of this source port, Alice speech parsing and HomeKit UI on the actual
 installation. Existing local v2 user feedback is evidence for the predecessor,
 not hardware acceptance of this release.
+
+## Delayed initial feedback fix: 3.7.1+askona.3
+
+2026-09-08, CPython 3.14.7, Home Assistant 2026.9.1.
+
+- Full integration suite: 2839 passed, 2 skipped in 283.26 seconds.
+- Focused calibrated controller suite: 34 passed.
+- Regression with the recorded 2.056-second initial feedback delay failed on
+  the previous code with the original two-probe ConnectionError, and passed
+  with the correction, reaching the requested 50% using simulated feedback.
+- Cancellation, client replacement, re-subscription and stale feedback during
+  the final passive wait tested; no extra motor writes during acquisition.
+- Ruff and Pyright on changed Python files: passed, zero type errors/warnings.
+- Manifest and project versions both 3.7.1+askona.3.
+- Archive contains 116 tracked component files; file hashes verified.
+
+No commands were sent to the physical bed. This version has not been installed
+on the user's HA by Codex, and hardware acceptance is pending. The change is
+based on the owner's supplied log and explicit permission to proceed without
+APK analysis; it does not claim upstream Phase 4 compliance.

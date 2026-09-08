@@ -35,6 +35,9 @@ FEEDBACK_MAX_AGE = 1.0
 PASSIVE_WAIT = 0.25
 PROBE_DURATION = 0.100
 PROBE_FEEDBACK_WAIT = 1.2
+# A captured cold start delivered its first valid report 2.056 s after the
+# second STOP. Allow that delayed report without extending motor activity.
+FINAL_PROBE_FEEDBACK_WAIT = 3.0
 WRITE_TIMEOUT = 2.0
 STEP_INTERVAL = 0.100
 NO_PROGRESS_TIMEOUT = 2.5
@@ -253,6 +256,8 @@ class CalibratedKeesonController(KeesonController):
             raise ConnectionError("Position subscription is not initialized")
         self._feedback_check_link(session)
         movement_attempted = False
+        acquisition_started = time.monotonic()
+        _LOGGER.info("Calibrated position: requested %s target %.2f%%", axis, target)
         try:
             async with asyncio.timeout(SEEK_TIMEOUT):
                 fresh = await self._feedback_wait_feedback(axis, session, PASSIVE_WAIT)
@@ -264,7 +269,7 @@ class CalibratedKeesonController(KeesonController):
                     # At most two bounded pulses. Prefer the requested endpoint's
                     # direction; one opposite pulse covers a non-reporting end stop.
                     first_up = target > 50.0
-                    for up in (first_up, not first_up):
+                    for probe_index, up in enumerate((first_up, not first_up)):
                         self._feedback_check_link(session)
                         if self._feedback_fresh(axis):
                             fresh = True
@@ -277,12 +282,27 @@ class CalibratedKeesonController(KeesonController):
                             "up" if up else "down",
                         )
                         await self._feedback_probe(axis, up, session)
+                        wait = (
+                            PROBE_FEEDBACK_WAIT if probe_index == 0 else FINAL_PROBE_FEEDBACK_WAIT
+                        )
+                        _LOGGER.debug(
+                            "Calibrated position: %s probe %d stopped; awaiting feedback up to %.2f s",
+                            axis,
+                            probe_index + 1,
+                            wait,
+                        )
                         fresh = await self._feedback_wait_feedback(
-                            axis, session, PROBE_FEEDBACK_WAIT, previous_seq
+                            axis, session, wait, previous_seq
                         )
                         if fresh:
                             break
                     if not fresh:
+                        _LOGGER.warning(
+                            "Calibrated position: %s target %.2f%% acquisition failed after %.3f s",
+                            axis,
+                            target,
+                            time.monotonic() - acquisition_started,
+                        )
                         raise ConnectionError(
                             "Calibrated position: no valid position after two bounded probes; stopped"
                         )
@@ -293,6 +313,13 @@ class CalibratedKeesonController(KeesonController):
                         "Calibrated position: feedback became stale before movement"
                     )
                 current = self._feedback_positions[axis]
+                _LOGGER.info(
+                    "Calibrated position: %s feedback acquired at %.2f%% after %.3f s (target %.2f%%)",
+                    axis,
+                    current,
+                    time.monotonic() - acquisition_started,
+                    target,
+                )
                 if abs(target - current) <= TOLERANCE:
                     return
                 up = target > current

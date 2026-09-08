@@ -46,6 +46,11 @@ connection and background reads never probe. The command first waits passively
 for 0.25 seconds, then permits at most two opposite-direction probes if enabled.
 Each nominal 100 ms probe is followed by the existing Ergomotion release/STOP.
 This is software timing after the write completes, not a hardware-timed pulse.
+After STOP, feedback is awaited passively for up to 1.2 seconds after the first
+probe and 3.0 seconds after the second. The final wait accommodates a recorded
+cold start whose first valid report arrived 2.056 seconds after the second STOP.
+No additional movement is sent while waiting; cancellation, session checks and
+the 1-second feedback freshness requirement still apply.
 
 Seeking requires feedback no older than 1 second, stops within 0.5 percentage
 points or at measured target crossing, and never publishes a fabricated target.

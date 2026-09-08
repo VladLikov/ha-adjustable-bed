@@ -56,6 +56,7 @@ def short_waits(monkeypatch):
     monkeypatch.setattr(module, "PASSIVE_WAIT", 0.002)
     monkeypatch.setattr(module, "PROBE_DURATION", 0.002)
     monkeypatch.setattr(module, "PROBE_FEEDBACK_WAIT", 0.004)
+    monkeypatch.setattr(module, "FINAL_PROBE_FEEDBACK_WAIT", 0.012)
     monkeypatch.setattr(module, "STEP_INTERVAL", 0.002)
     monkeypatch.setattr(module, "WRITE_TIMEOUT", 0.05)
     monkeypatch.setattr(module, "SEEK_TIMEOUT", 0.5)
@@ -262,3 +263,83 @@ async def test_repeated_cancel_waits_for_stop_cleanup(rig):
         release.set()
         with pytest.raises(asyncio.CancelledError):
             await task
+
+
+async def test_delayed_first_feedback_after_second_stop_reaches_target(rig, monkeypatch):
+    """Replay the observed 2.056 s delay, beyond the old 1.2 s deadline."""
+    monkeypatch.setattr(module, "PROBE_FEEDBACK_WAIT", 1.2)
+    monkeypatch.setattr(module, "FINAL_PROBE_FEEDBACK_WAIT", 3.0)
+    monkeypatch.setattr(module, "SEEK_TIMEOUT", 10)
+    await subscribe(rig)
+    commands = []
+    second_stop = asyncio.Event()
+    feedback_delivered = False
+
+    async def write(command, **kwargs):
+        key = int.from_bytes(command[3:7], "little")
+        commands.append(key)
+        if commands == [8, 0, 4, 0]:
+            second_stop.set()
+        elif key and feedback_delivered:
+            assert key == 4
+            notify(rig, legs=5793)
+
+    async def delayed_feedback():
+        nonlocal feedback_delivered
+        await second_stop.wait()
+        await asyncio.sleep(2.056)
+        # Only two probes and their STOPs while awaiting the initial report.
+        assert commands == [8, 0, 4, 0]
+        assert rig.ctrl.position_motion == (None, None)
+        notify(rig, legs=42)
+        feedback_delivered = True
+
+    with patch.object(rig.ctrl, "write_command", side_effect=write):
+        async with asyncio.TaskGroup() as group:
+            group.create_task(delayed_feedback())
+            group.create_task(rig.ctrl.async_feedback_seek("legs", 50))
+    assert commands == [8, 0, 4, 0, 4, 0]
+    assert rig.coordinator.position_data["legs"] == 50
+    assert rig.ctrl.position_motion == (None, None)
+
+
+@pytest.mark.parametrize("failure", ["cancel", "client", "session", "stale"])
+async def test_final_passive_wait_preserves_safety_guards(rig, monkeypatch, failure):
+    monkeypatch.setattr(module, "FINAL_PROBE_FEEDBACK_WAIT", 0.15)
+    await subscribe(rig)
+    commands = []
+    second_stop = asyncio.Event()
+
+    async def write(command, **kwargs):
+        commands.append(int.from_bytes(command[3:7], "little"))
+        if commands == [8, 0, 4, 0]:
+            second_stop.set()
+
+    with patch.object(rig.ctrl, "write_command", side_effect=write):
+        task = asyncio.create_task(rig.ctrl.async_feedback_seek("legs", 50))
+        try:
+            await asyncio.wait_for(second_stop.wait(), 1)
+            await asyncio.sleep(0.02)
+            assert not task.done()
+            assert commands == [8, 0, 4, 0]
+            if failure == "cancel":
+                rig.coordinator.cancel_command.set()
+            elif failure == "client":
+                rig.coordinator.client = MagicMock(is_connected=True)
+            elif failure == "session":
+                await subscribe(rig)
+            else:
+                notify(rig, legs=5793)
+                rig.ctrl._feedback_stamp = time.monotonic() - 2
+            with pytest.raises(asyncio.CancelledError if failure == "cancel" else ConnectionError):
+                await task
+        finally:
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+    assert [v for v in commands if v] == [8, 4]
+    if failure in ("cancel", "stale"):
+        assert commands[-1] == 0
+    else:
+        assert commands == [8, 0, 4, 0]  # Never send cleanup onto a replaced link.
+    assert rig.ctrl.position_motion == (None, None)
