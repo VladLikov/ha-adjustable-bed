@@ -110,3 +110,47 @@ the next restart. Do not delete the Adjustable Bed entry under Devices & service
 Do not leave both HACS sources marked installed for the same component path.
 Local v1/v2 users must restore v2 first and v1 second before replacing the source.
 Never run either local patch installer on the fork.
+
+
+## Experimental native targets for confirmed Ergomotion 633 (askona.6)
+
+Enable **Experimental native positions (confirmed Ergomotion 633 only; no motion
+probes)** in the same options form. It is disabled by default and requires the
+calibrated-position toggle, two motors, Ergomotion variant and angle sensing.
+Keep the existing raw maxima for rollback. In native mode these maxima and the
+motion-probe option do not control position seeking. The preceding directional
+seek description applies only with this new toggle off.
+
+The Askona Android 5.4.2 CustomPreset slider path supplies a single absolute
+head/feet pair. This mode sends that pair once through the existing serialized
+GATT writer. It does not pulse direction commands or send STOP on successful
+completion. Both axes must have fresh feedback from this subscription: the
+unchanged coordinate is taken from the same snapshot, never filled with zero.
+Initial feedback is awaited passively for up to 5 seconds; absence fails before
+sending any movement. This may still fail on a cold connection that sends no
+unsolicited notification. No motion-based fallback is attempted.
+
+Native percentages use the notification high-byte coordinates and model-633
+limits head=68, feet=44. A 50% request maps to 34/22; resolution is about 1.47/2.27
+percentage points. Targets are rounded to the nearest coordinate, while state
+always comes from actual notifications. Low raw-byte fractions are not native
+app coordinates. This intentionally replaces raw-calibration scaling in this
+mode. It does not change HomeKit inversion or Yandex configuration.
+
+The write has a 2-second timeout with no retry on uncertain delivery. During
+observation the existing 1-second freshness requirement applies, with 5 seconds
+without coordinate progress and a 60-second operation watchdog. These are local
+watchdogs, not timings extracted from the app. Target completion requires a
+post-dispatch notification at or beyond the quantized target. Lost connection,
+cancellation, timeout or reverse motion triggers best-effort directional STOP
+on the pinned connection. Physical cancellation of autonomous native targets by
+that STOP is **unverified**; the native app slider path did not establish it.
+Do not assume a successful STOP write proves mechanical stopping.
+
+Evidence: the 633 slider, mapper and state paths in the complete Android 5.4.2
+artifact were checked against DEX smali. This is partial, non-clean-room personal
+fork analysis, not proof that the iOS implementation is identical and not
+hardware acceptance. It must not be auto-selected by brand, name or BLE address.
+The user confirmed model 633; Element and 180x200 are outside this opt-in mode.
+First hardware checks must cover Stop, preservation of the other section, a
+modest target in each direction, real percentage reporting and idle reconnect.

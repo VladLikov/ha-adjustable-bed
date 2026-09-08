@@ -265,6 +265,71 @@ async def test_repeated_cancel_waits_for_stop_cleanup(rig):
             await task
 
 
+@pytest.mark.parametrize("probe", [False, True])
+async def test_operation_error_survives_stop_failure(rig, probe, caplog):
+    await subscribe(rig)
+    if not probe:
+        notify(rig, 8850, 0)
+    original = RuntimeError("movement write failed")
+    stop_error = TimeoutError("STOP reply missing")
+    with (
+        patch.object(rig.ctrl, "_feedback_move_write", side_effect=original) as move,
+        patch.object(rig.ctrl, "_feedback_stop_now", side_effect=stop_error),
+        pytest.raises(RuntimeError, match="movement write failed") as caught,
+    ):
+        await rig.ctrl.async_feedback_seek("back", 75)
+    assert caught.value is original
+    assert any("STOP not confirmed" in note for note in original.__notes__)
+    assert "STOP reply missing" in caplog.text
+    assert "original operation failed" in caplog.text
+    assert move.await_count == 1
+
+
+async def test_cancel_survives_failed_stop(rig):
+    await subscribe(rig)
+    notify(rig, 8850, 0)
+    with (
+        patch.object(rig.ctrl, "_feedback_move_write", side_effect=asyncio.CancelledError),
+        patch.object(rig.ctrl, "_feedback_stop_now", side_effect=TimeoutError("STOP reply missing")),
+        pytest.raises(asyncio.CancelledError) as caught,
+    ):
+        await rig.ctrl.async_feedback_seek("back", 75)
+    assert any("STOP not confirmed" in note for note in caught.value.__notes__)
+
+
+async def test_move_and_stop_timeouts_preserve_write_context(rig):
+    await subscribe(rig)
+    notify(rig, 8850, 0)
+
+    async def blocked_write(*args, **kwargs):
+        await asyncio.sleep(1)
+
+    with (
+        patch.object(rig.ctrl, "write_command", side_effect=blocked_write) as write,
+        pytest.raises(TimeoutError, match="position operation timed out") as caught,
+    ):
+        await rig.ctrl.async_feedback_seek("back", 75)
+    assert "back up write did not complete" in str(caught.value.__cause__)
+    assert any("STOP not confirmed" in note for note in caught.value.__notes__)
+    assert write.await_count == 2  # one movement attempt and one bounded STOP
+
+
+async def test_reached_target_with_failed_stop_is_not_success(rig):
+    await subscribe(rig)
+    notify(rig, 8850, 0)
+
+    async def move(*args):
+        notify(rig, 13275, 0)
+
+    with (
+        patch.object(rig.ctrl, "_feedback_move_write", side_effect=move),
+        patch.object(rig.ctrl, "_feedback_stop_now", side_effect=TimeoutError("STOP reply missing")),
+        pytest.raises(TimeoutError, match="STOP reply missing") as caught,
+    ):
+        await rig.ctrl.async_feedback_seek("back", 75)
+    assert any("STOP not confirmed" in note for note in caught.value.__notes__)
+
+
 async def test_delayed_first_feedback_after_second_stop_reaches_target(rig, monkeypatch):
     """Replay the observed 2.056 s delay, beyond the old 1.2 s deadline."""
     monkeypatch.setattr(module, "PROBE_FEEDBACK_WAIT", 1.2)

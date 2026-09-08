@@ -19,6 +19,7 @@ from custom_components.adjustable_bed.position_profile import (
     CONF_BACK_RAW_MAX,
     CONF_CALIBRATED_POSITION,
     CONF_LEGS_RAW_MAX,
+    CONF_NATIVE_633_POSITION,
 )
 
 
@@ -151,6 +152,7 @@ async def test_options_validate_and_preserve_calibration(hass, entry, maximum, v
     assert result["type"] == FlowResultType.FORM
     keys = {str(key) for key in result["data_schema"].schema}
     assert CONF_CALIBRATED_POSITION in keys
+    assert CONF_NATIVE_633_POSITION in keys
     result = await hass.config_entries.options.async_configure(
         result["flow_id"],
         user_input={
@@ -159,6 +161,7 @@ async def test_options_validate_and_preserve_calibration(hass, entry, maximum, v
             "motor_count": 2,
             "disable_angle_sensing": False,
             CONF_CALIBRATED_POSITION: True,
+            CONF_NATIVE_633_POSITION: True,
             CONF_BACK_RAW_MAX: maximum,
             CONF_LEGS_RAW_MAX: 11586,
             CONF_ALLOW_MOTION_PROBE: True,
@@ -167,6 +170,7 @@ async def test_options_validate_and_preserve_calibration(hass, entry, maximum, v
     if valid:
         assert result["type"] == FlowResultType.CREATE_ENTRY
         assert entry.data[CONF_BACK_RAW_MAX] == 17700
+        assert entry.data[CONF_NATIVE_633_POSITION] is True
     else:
         assert result["errors"] == {"base": "invalid_position_profile"}
 
@@ -260,3 +264,15 @@ async def test_start_expiry_does_not_interrupt_an_active_seek(hass, entry, monke
         await coordinator.async_seek_position("legs", 50, None, None, None)
     assert completed.is_set()
     controller.async_feedback_seek.assert_awaited_once()
+
+
+async def test_factory_native_633_is_explicit(hass, entry, mock_coordinator_connected):
+    from custom_components.adjustable_bed.beds.keeson_native import Native633KeesonController
+    from custom_components.adjustable_bed.position_profile import CONF_NATIVE_633_POSITION
+
+    hass.config_entries.async_update_entry(entry, data={**entry.data, CONF_NATIVE_633_POSITION: True})
+    coordinator = AdjustableBedCoordinator(hass, entry)
+    await coordinator.async_connect()
+    assert isinstance(coordinator.controller, Native633KeesonController)
+    assert coordinator.feedback_seek_axes == ("back", "legs")
+    await coordinator.async_disconnect()

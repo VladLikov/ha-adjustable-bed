@@ -2874,11 +2874,13 @@ class AdjustableBedOptionsFlow(OptionsFlowWithConfigEntry):
                 CONF_BACK_RAW_MAX,
                 CONF_CALIBRATED_POSITION,
                 CONF_LEGS_RAW_MAX,
+                CONF_NATIVE_633_POSITION,
             )
             schema_dict[vol.Optional(CONF_CALIBRATED_POSITION, default=current_data.get(CONF_CALIBRATED_POSITION, False))] = bool
             for key in (CONF_BACK_RAW_MAX, CONF_LEGS_RAW_MAX):
                 schema_dict[vol.Optional(key, default=current_data.get(key, 0))] = vol.All(vol.Coerce(int), vol.Range(min=0, max=65534))
             schema_dict[vol.Optional(CONF_ALLOW_MOTION_PROBE, default=current_data.get(CONF_ALLOW_MOTION_PROBE, False))] = bool
+            schema_dict[vol.Optional(CONF_NATIVE_633_POSITION, default=current_data.get(CONF_NATIVE_633_POSITION, False))] = bool
 
         # Add PIN field for Octo beds
         if bed_type == BED_TYPE_OCTO:

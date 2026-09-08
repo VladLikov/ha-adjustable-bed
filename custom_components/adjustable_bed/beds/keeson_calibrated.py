@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import sys
 import time
 from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any
@@ -126,8 +127,14 @@ class CalibratedKeesonController(KeesonController):
 
         await self.client.start_notify(self._notify_char_uuid, on_notification)
 
+    def _decode_feedback(self, data: bytes) -> dict[str, int] | None:
+        return decode_frame(data, self._profile.maxima)
+
+    def _feedback_percentages(self, raw: Mapping[str, int]) -> dict[str, float]:
+        return {axis: to_percent(raw[axis], self._profile.maxima[axis]) for axis in AXES}
+
     def _parse_position_message(self, data: bytes, msg_len: int) -> None:
-        raw = decode_frame(bytes(data), self._profile.maxima)
+        raw = self._decode_feedback(bytes(data))
         if raw is None:
             self._feedback_rejected = getattr(self, "_feedback_rejected", 0) + 1
             return
@@ -136,7 +143,7 @@ class CalibratedKeesonController(KeesonController):
             return
         if self.client is not getattr(self, "_feedback_client", None):
             return
-        positions = {axis: to_percent(raw[axis], self._profile.maxima[axis]) for axis in AXES}
+        positions = self._feedback_percentages(raw)
         self._feedback_raw = raw
         self._feedback_positions = positions
         self._feedback_stamp = time.monotonic()
@@ -223,10 +230,17 @@ class CalibratedKeesonController(KeesonController):
     async def _feedback_move_write(self, axis: str, up: bool, session: object) -> None:
         self._feedback_check_link(session)
         # Never retry a timed-out motor write: it may already have reached the bed.
-        async with asyncio.timeout(WRITE_TIMEOUT):
-            await self.write_command(
-                self._build_command(COMMANDS[axis, up]), repeat_count=1, repeat_delay_ms=100
-            )
+        started = time.monotonic()
+        try:
+            async with asyncio.timeout(WRITE_TIMEOUT):
+                await self.write_command(
+                    self._build_command(COMMANDS[axis, up]), repeat_count=1, repeat_delay_ms=100
+                )
+        except TimeoutError as err:
+            raise TimeoutError(
+                f"Calibrated position: {axis} {'up' if up else 'down'} write did not complete "
+                f"within {time.monotonic() - started:.3f} s; delivery unknown; no movement retry"
+            ) from err
         self._feedback_check_link(session)
 
     async def _feedback_stop_now(self, session: object) -> None:
@@ -269,9 +283,30 @@ class CalibratedKeesonController(KeesonController):
             await asyncio.sleep(PROBE_DURATION)
         finally:
             try:
-                await self._feedback_stop_shielded(session)
+                await self._feedback_stop_cleanup(session, sys.exception())
             finally:
                 self._set_motion(None)
+
+    async def _feedback_stop_cleanup(
+        self, session: object, operation_error: BaseException | None
+    ) -> None:
+        """Preserve an operation failure even when bounded STOP cleanup also fails."""
+        try:
+            await self._feedback_stop_shielded(session)
+        except Exception as stop_error:
+            message = (
+                "Calibrated position: STOP not confirmed; "
+                f"{type(stop_error).__name__}: {stop_error}"
+            )
+            _LOGGER.error(message, exc_info=True)
+            if operation_error is None:
+                stop_error.add_note(message)
+                raise
+            operation_error.add_note(message)
+            _LOGGER.error(
+                "Calibrated position: original operation failed; target not confirmed",
+                exc_info=(type(operation_error), operation_error, operation_error.__traceback__),
+            )
 
     async def async_feedback_seek(self, axis: str, target: float) -> None:
         """One explicit operation: acquire feedback, then position with watchdogs."""
@@ -393,6 +428,6 @@ class CalibratedKeesonController(KeesonController):
         finally:
             try:
                 if movement_attempted:
-                    await self._feedback_stop_shielded(session)
+                    await self._feedback_stop_cleanup(session, sys.exception())
             finally:
                 self._set_motion(None)

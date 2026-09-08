@@ -684,6 +684,10 @@ async def create_controller(
 
             profile = PositionProfile.from_data(coordinator.entry.data)
             if profile is not None:
+                if profile.native_633_position:
+                    from .beds.keeson_native import Native633KeesonController
+
+                    return Native633KeesonController(coordinator, profile)
                 from .beds.keeson_calibrated import CalibratedKeesonController
 
                 return CalibratedKeesonController(coordinator, profile)
