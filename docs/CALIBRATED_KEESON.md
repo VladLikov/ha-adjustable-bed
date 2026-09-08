@@ -54,6 +54,11 @@ the 1-second feedback freshness requirement still apply.
 
 Seeking requires feedback no older than 1 second, stops within 0.5 percentage
 points or at measured target crossing, and never publishes a fabricated target.
+Target feedback interrupts the interval between motor writes. If the target is
+reported while a GATT write is pending, STOP follows completion of that bounded
+write without an additional interval. Intermediate feedback does not accelerate
+command writes. Transport delay and mechanical stopping distance still limit
+position accuracy; the requested percentage is never substituted for feedback.
 It aborts on wrong direction (>1 percentage point), no progress (2.5 seconds),
 link/session change or timeout (60 seconds). GATT writes are bounded to
 2 seconds and a timed-out motor write is not retried. STOP cleanup stays inside

@@ -343,3 +343,130 @@ async def test_final_passive_wait_preserves_safety_guards(rig, monkeypatch, fail
     else:
         assert commands == [8, 0, 4, 0]  # Never send cleanup onto a replaced link.
     assert rig.ctrl.position_motion == (None, None)
+
+
+@pytest.mark.parametrize("axis", ["back", "legs"])
+@pytest.mark.parametrize("up", [True, False])
+@pytest.mark.parametrize("arrival", ["during_write", "during_interval"])
+async def test_target_feedback_interrupts_step_without_overlapping_stop(
+    rig, monkeypatch, axis, up, arrival
+):
+    monkeypatch.setattr(module, "STEP_INTERVAL", 1.0)
+    monkeypatch.setattr(module, "SEEK_TIMEOUT", 3.0)
+    await subscribe(rig)
+    initial = 25 if up else 75
+    maximum = 17700 if axis == "back" else 11586
+
+    def sample(percent):
+        notify(rig, **{axis: round(maximum * percent / 100)})
+
+    sample(initial)
+    movement_started = asyncio.Event()
+    write_finished = asyncio.Event()
+    release_write = asyncio.Event()
+    stop_started = asyncio.Event()
+    commands = []
+    writing = False
+
+    async def write(command, **kwargs):
+        nonlocal writing
+        key = int.from_bytes(command[3:7], "little")
+        commands.append(key)
+        if key:
+            writing = True
+            movement_started.set()
+            if arrival == "during_write":
+                await release_write.wait()
+            writing = False
+            write_finished.set()
+        else:
+            assert not writing  # STOP must not overlap a pending GATT write.
+            stop_started.set()
+
+    with patch.object(rig.ctrl, "write_command", side_effect=write):
+        task = asyncio.create_task(rig.ctrl.async_feedback_seek(axis, 50))
+        try:
+            await asyncio.wait_for(movement_started.wait(), 1)
+            if arrival == "during_interval":
+                await write_finished.wait()
+                await asyncio.sleep(0.01)
+            sample(50)
+            if arrival == "during_write":
+                await asyncio.sleep(0)
+                assert not stop_started.is_set()
+                release_write.set()
+            # The old unconditional one-second pause fails this deadline.
+            await asyncio.wait_for(stop_started.wait(), 0.2)
+            await task
+        finally:
+            release_write.set()
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+    assert commands == [module.COMMANDS[axis, up], 0]
+    assert rig.coordinator.position_data[axis] == 50
+
+
+async def test_intermediate_feedback_does_not_accelerate_motor_writes(rig, monkeypatch):
+    monkeypatch.setattr(module, "STEP_INTERVAL", 0.12)
+    await subscribe(rig)
+    notify(rig, legs=1000)
+    times = []
+    first_write = asyncio.Event()
+
+    async def write(command, **kwargs):
+        key = int.from_bytes(command[3:7], "little")
+        if key:
+            times.append(time.monotonic())
+            first_write.set()
+            if len(times) == 2:
+                notify(rig, legs=5793)
+
+    async def intermediate_reports():
+        await first_write.wait()
+        for raw in range(1100, 1600, 100):
+            await asyncio.sleep(0.01)
+            notify(rig, legs=raw)
+
+    with patch.object(rig.ctrl, "write_command", side_effect=write):
+        async with asyncio.TaskGroup() as group:
+            group.create_task(intermediate_reports())
+            group.create_task(rig.ctrl.async_feedback_seek("legs", 50))
+    assert len(times) == 2
+    assert times[1] - times[0] >= 0.12
+
+
+@pytest.mark.parametrize("failure", ["cancel", "client", "stale"])
+async def test_step_wait_observes_safety_guards_before_next_write(rig, monkeypatch, failure):
+    monkeypatch.setattr(module, "STEP_INTERVAL", 1.0)
+    monkeypatch.setattr(module, "SEEK_TIMEOUT", 3.0)
+    await subscribe(rig)
+    notify(rig, legs=1000)
+    started = asyncio.Event()
+    commands = []
+
+    async def write(command, **kwargs):
+        commands.append(int.from_bytes(command[3:7], "little"))
+        if commands[-1]:
+            started.set()
+
+    with patch.object(rig.ctrl, "write_command", side_effect=write):
+        task = asyncio.create_task(rig.ctrl.async_feedback_seek("legs", 50))
+        try:
+            await asyncio.wait_for(started.wait(), 1)
+            await asyncio.sleep(0.01)
+            if failure == "cancel":
+                rig.coordinator.cancel_command.set()
+            elif failure == "client":
+                rig.coordinator.client = MagicMock(is_connected=True)
+            else:
+                rig.ctrl._feedback_stamp = time.monotonic() - 2
+            expected = asyncio.CancelledError if failure == "cancel" else ConnectionError
+            with pytest.raises(expected):
+                await asyncio.wait_for(asyncio.shield(task), 0.2)
+        finally:
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+    assert commands == ([4] if failure == "client" else [4, 0])
+    assert rig.ctrl.position_motion == (None, None)

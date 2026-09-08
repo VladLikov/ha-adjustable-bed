@@ -189,6 +189,37 @@ class CalibratedKeesonController(KeesonController):
             except TimeoutError:
                 pass
 
+    def _feedback_reached_target(self, axis: str, target: float, up: bool) -> bool:
+        current = self._feedback_positions[axis]
+        return (
+            abs(target - current) <= TOLERANCE
+            or (up and current >= target)
+            or (not up and current <= target)
+        )
+
+    async def _feedback_wait_step(
+        self, axis: str, target: float, up: bool, session: object
+    ) -> None:
+        """Keep write pacing, but wake immediately for target feedback and STOP."""
+        deadline = time.monotonic() + STEP_INTERVAL
+        while True:
+            self._feedback_check_link(session)
+            if not self._feedback_fresh(axis):
+                raise ConnectionError("Calibrated position: live position feedback lost; stopped")
+            # Also checks feedback received while the preceding write was pending.
+            if self._feedback_reached_target(axis, target, up):
+                return
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            # Intermediate reports must not shorten the motor-write interval.
+            # No await between testing the snapshot and clearing its wake event.
+            self._feedback_event.clear()
+            try:
+                await asyncio.wait_for(self._feedback_event.wait(), min(0.05, remaining))
+            except TimeoutError:
+                pass
+
     async def _feedback_move_write(self, axis: str, up: bool, session: object) -> None:
         self._feedback_check_link(session)
         # Never retry a timed-out motor write: it may already have reached the bed.
@@ -334,11 +365,7 @@ class CalibratedKeesonController(KeesonController):
                             "Calibrated position: live position feedback lost; stopped"
                         )
                     current = self._feedback_positions[axis]
-                    if (
-                        abs(target - current) <= TOLERANCE
-                        or (up and current >= target)
-                        or (not up and current <= target)
-                    ):
+                    if self._feedback_reached_target(axis, target, up):
                         break
                     progress = (current - best) if up else (best - current)
                     if progress >= 0.1:
@@ -351,10 +378,10 @@ class CalibratedKeesonController(KeesonController):
                         raise RuntimeError("Calibrated position: section made no progress; stopped")
                     movement_attempted = True
                     await self._feedback_move_write(axis, up, session)
-                    await asyncio.sleep(STEP_INTERVAL)
+                    await self._feedback_wait_step(axis, target, up, session)
                 # Never fabricate exact completion by publishing the requested value.
                 _LOGGER.info(
-                    "Calibrated position: %s stopped at measured %.2f%% (target %.2f%%)",
+                    "Calibrated position: %s target detected at measured %.2f%% (target %.2f%%); sending STOP",
                     axis,
                     current,
                     target,

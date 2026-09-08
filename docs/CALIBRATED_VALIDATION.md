@@ -48,3 +48,23 @@ No commands were sent to the physical bed. This version has not been installed
 on the user's HA by Codex, and hardware acceptance is pending. The change is
 based on the owner's supplied log and explicit permission to proceed without
 APK analysis; it does not claim upstream Phase 4 compliance.
+
+## Responsive target STOP: 3.7.1+askona.4
+
+2026-09-08, CPython 3.14.7, Home Assistant 2026.9.1.
+
+- Full integration suite: 2851 passed, 2 skipped in 285.18 seconds.
+- Calibrated controller suite: 46 passed.
+- Target-arrival regression failed on askona.3 before the patch and passed after.
+- Both axes and directions covered, with target feedback arriving during a GATT
+  write or during the interval. STOP never overlaps a pending movement write.
+- Intermediate feedback preserves write pacing; cancellation, client replacement
+  and stale feedback are observed before the next movement write.
+- Ruff and Pyright on changed Python files: passed, zero errors/warnings.
+- Manifest and pyproject versions both 3.7.1+askona.4.
+- Deployment component file hashes checked against the archive.
+
+No hardware commands or changes to the user's HA were made. The fixed software
+pause is removed; transport and mechanical delays still limit final accuracy.
+Hardware verification of this release remains pending. Initial probes and the
+3-second final acquisition wait are unchanged.
