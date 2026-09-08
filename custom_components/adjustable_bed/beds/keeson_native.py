@@ -14,7 +14,7 @@ import sys
 import time
 from collections.abc import Mapping
 
-from .keeson_calibrated import AXES, CalibratedKeesonController, decode_frame, validate_target
+from .keeson_calibrated import AXES, CalibratedKeesonController, validate_target
 
 _LOGGER = logging.getLogger(__name__)
 NATIVE_MAXIMA = {"back": 68, "legs": 44}
@@ -43,15 +43,24 @@ class Native633KeesonController(CalibratedKeesonController):
     """Send one absolute target, observing real notifications until completion."""
 
     def _decode_feedback(self, data: bytes) -> dict[str, int] | None:
-        # Keep frame integrity validation; raw calibration belongs to the old
-        # directional mode and must not rescale the native app coordinates.
-        return decode_frame(
-            data, {axis: (maximum << 8) + 255 for axis, maximum in NATIVE_MAXIMA.items()}
-        )
+        # The native app reads signed bytes 4/6 and clamps to model limits.
+        # Do not apply the old raw-16-bit sentinel/maxima rejection here:
+        # recorded endpoint FFFF represents a signed -1, clamped to zero.
+        if len(data) != 16 or data[:3] != b"\xed\xfe\x16" or sum(data) & 0xFF != 0xFF:
+            return None
+        return {
+            "back": int.from_bytes(data[3:5], "little"),
+            "legs": int.from_bytes(data[5:7], "little"),
+        }
 
     @staticmethod
     def _coordinates(raw: Mapping[str, int]) -> dict[str, int]:
-        return {axis: min(raw[axis] >> 8, NATIVE_MAXIMA[axis]) for axis in AXES}
+        coordinates = {}
+        for axis in AXES:
+            value = (raw[axis] >> 8) & 0xFF
+            signed = value - 256 if value >= 128 else value
+            coordinates[axis] = max(0, min(signed, NATIVE_MAXIMA[axis]))
+        return coordinates
 
     def _feedback_percentages(self, raw: Mapping[str, int]) -> dict[str, float]:
         return {

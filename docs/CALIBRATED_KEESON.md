@@ -154,3 +154,13 @@ hardware acceptance. It must not be auto-selected by brand, name or BLE address.
 The user confirmed model 633; Element and 180x200 are outside this opt-in mode.
 First hardware checks must cover Stop, preservation of the other section, a
 modest target in each direction, real percentage reporting and idle reconnect.
+
+
+### askona.7 endpoint decoding correction
+
+Native 633 coordinates are signed bytes before clamping to 0..68/44, matching
+the native app. In particular, the recorded FFFF endpoint is read as -1 and
+clamped to zero, rather than rejected by the legacy raw-16-bit decoder.
+Frame length, header and checksum validation remain required. The calibrated
+directional mode retains its existing sentinel checks. A recorded-frame
+regression verifies position recovery and subsequent native target dispatch.

@@ -272,3 +272,23 @@ async def test_native_bad_checksum_cannot_refresh_feedback(rig):
     rig.client.start_notify.call_args.args[1](None, raw)
     assert rig.ctrl._feedback_positions == {}
     assert rig.ctrl._feedback_seq == 0
+
+
+async def test_recorded_negative_endpoint_after_reconnect_can_start_target(rig):
+    await subscribe(rig)
+    packet = bytes.fromhex("edfe160000ffff0000000000000ffff2")
+    rig.client.start_notify.call_args.args[1](None, bytearray(packet))
+    assert rig.ctrl._feedback_positions == {"back": 0.0, "legs": 0.0}
+    rig.client.write_gatt_char.side_effect = lambda *a, **kw: notify(rig, 0, 22 << 8)
+    await rig.ctrl.async_feedback_seek("legs", 50)
+    rig.client.write_gatt_char.assert_awaited_once()
+    assert rig.client.write_gatt_char.call_args.args[1].hex() == "e5fe1700000016ef"
+
+
+@pytest.mark.parametrize(
+    "raw,expected", [(0xFFFF, 0), (0xFF00, 0), (0x8000, 0), (0x7FFF, 100), (0x2C00, 100)]
+)
+async def test_native_signed_coordinate_clamping(rig, raw, expected):
+    await subscribe(rig)
+    notify(rig, 0, raw)
+    assert rig.ctrl._feedback_positions["legs"] == expected
